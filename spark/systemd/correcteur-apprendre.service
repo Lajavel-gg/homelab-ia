@@ -1,0 +1,8 @@
+[Unit]
+Description=Apprentissage nocturne du Correcteur (carnet de fautes personnel)
+After=llama-flashnext.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/ai-stack/correcteur/apprendre.py
+StandardOutput=append:/var/log/correcteur-apprendre.log
+StandardError=append:/var/log/correcteur-apprendre.log

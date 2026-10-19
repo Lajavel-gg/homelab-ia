@@ -1,0 +1,13 @@
+[Unit]
+Description=Sauvegarde nocturne du Spark vers pve2 (restic chiffré, ajout seulement)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sauvegarde-spark
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=4h
+StandardOutput=append:/var/log/sauvegarde-spark.log
+StandardError=append:/var/log/sauvegarde-spark.log

@@ -1,0 +1,53 @@
+{
+  "mcpServers": {
+    "time": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-time",
+        "--local-timezone=Europe/Paris"
+      ]
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/workspace"
+      ]
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    },
+    "browser": {
+      "command": "agent-browser",
+      "args": [
+        "mcp"
+      ],
+      "env": {
+        "AGENT_BROWSER_ARGS": "--no-sandbox,--disable-dev-shm-usage",
+        "AGENT_BROWSER_EXECUTABLE_PATH": "/usr/bin/chromium"
+      }
+    },
+    "mail": {
+      "command": "uv",
+      "args": [
+        "run",
+        "-q",
+        "--with",
+        "mcp",
+        "python",
+        "/app/mail/mail_mcp.py"
+      ]
+    }
+  }
+}

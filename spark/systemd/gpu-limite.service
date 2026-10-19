@@ -1,0 +1,14 @@
+[Unit]
+Description=Limite la fréquence du GPU GB10 à 2100 MHz (anti-surchauffe, forum NVIDIA t/383939, ~1,6 % de perte)
+After=nvidia-persistenced.service
+Before=llama-flashnext.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/local/bin/attendre-gpu
+ExecStart=/usr/bin/nvidia-smi -lgc 0,2100
+ExecStop=/usr/bin/nvidia-smi -rgc
+
+[Install]
+WantedBy=multi-user.target

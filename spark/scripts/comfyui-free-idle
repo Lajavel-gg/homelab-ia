@@ -1,0 +1,5 @@
+#!/bin/sh
+# Libère les modèles de ComfyUI (mémoire unifiée partagée avec les LLM) quand la file est vide.
+q=$(curl -s --max-time 5 http://127.0.0.1:8188/queue) || exit 0
+echo "$q" | grep -q '"queue_running": \[\], "queue_pending": \[\]\|"queue_running":\[\],"queue_pending":\[\]' || exit 0
+curl -s --max-time 10 -X POST http://127.0.0.1:8188/free -H 'content-type: application/json' -d '{"unload_models":true,"free_memory":true}' >/dev/null

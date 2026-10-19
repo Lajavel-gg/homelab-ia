@@ -1,0 +1,3 @@
+# /home/sauvegarde/.ssh/authorized_keys sur le serveur de sauvegarde :
+# la clé du Spark ne peut QUE lancer rclone en mode « ajout seulement » (append-only) : impossible d'effacer ou modifier.
+restrict,command="rclone serve restic --stdio --append-only /mnt/tank/sauvegardes/spark" ssh-ed25519 AAAA... spark

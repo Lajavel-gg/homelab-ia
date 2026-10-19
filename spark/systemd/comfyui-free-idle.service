@@ -1,0 +1,5 @@
+[Unit]
+Description=Free ComfyUI models when idle
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/comfyui-free-idle

@@ -1,0 +1,24 @@
+[Unit]
+Description=llama.cpp server - Qwen3.8-Flash-Next IQ3_XXS (OpenAI + Anthropic API on 127.0.0.1:8090)
+After=network-online.target
+
+[Service]
+ExecStart=/opt/llama.cpp-correctif/build/bin/llama-server \
+  -m /opt/models/qwen38-flash-next/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf \
+  --mmproj /opt/models/qwen38-flash-next/mmproj-Qwen3.8-Flash-Next-BF16.gguf \
+  --chat-template-file /opt/models/qwen38-flash-next/chat_template.froggeric-v22.5.jinja --jinja \
+  --reasoning-format deepseek --chat-template-kwargs '{"max_tool_response_chars":30000}' \
+  -ngl 99 -fa on -c 262144 -np 2 --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 0 \
+  -md /opt/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-Q8_0.gguf --spec-type draft-mtp --spec-draft-n-max 3 \
+  --no-kv-unified -ctkd q8_0 -ctvd q8_0 \
+  --ctx-checkpoints 8 --checkpoint-min-step 2048 \
+  --sleep-idle-seconds 1800 \
+  --host 127.0.0.1 --port 8090 -a qwen3.8-flash-next
+Restart=on-failure
+RestartSec=10
+DynamicUser=yes
+# En cas de manque de mémoire, c'est ce service qui doit partir en premier
+OOMScoreAdjust=900
+
+[Install]
+WantedBy=multi-user.target

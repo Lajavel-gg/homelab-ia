@@ -1,0 +1,7 @@
+[Unit]
+Description=Free ComfyUI models every 5 min when idle
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target

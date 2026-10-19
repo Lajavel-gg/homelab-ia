@@ -1,0 +1,10 @@
+[Unit]
+Description=Sauvegarde du Spark chaque nuit à 3 h
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

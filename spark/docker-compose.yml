@@ -1,0 +1,130 @@
+name: ai-stack
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    network_mode: host
+    restart: unless-stopped
+    volumes: [open-webui:/app/backend/data]
+    environment:
+      HOST: 127.0.0.1
+      PORT: "8080"
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      OLLAMA_BASE_URL: http://127.0.0.1:11434
+      DEFAULT_MODELS: qwen3.8:27b-mtp-q4_K_M
+      TASK_MODEL: qwen3.8:27b-mtp-q4_K_M
+      # RAG / mémoire vectorielle
+      VECTOR_DB: qdrant
+      QDRANT_URI: http://127.0.0.1:6333
+      RAG_EMBEDDING_ENGINE: ollama
+      RAG_EMBEDDING_MODEL: bge-m3
+      ENABLE_RAG_HYBRID_SEARCH: "true"
+      RAG_RERANKING_MODEL: BAAI/bge-reranker-v2-m3
+      RAG_TOP_K: "8"
+      CHUNK_SIZE: "1500"
+      CHUNK_OVERLAP: "200"
+      # Recherche web
+      ENABLE_WEB_SEARCH: "true"
+      WEB_SEARCH_ENGINE: searxng
+      SEARXNG_QUERY_URL: http://127.0.0.1:8081/search?q=<query>
+      WEB_SEARCH_RESULT_COUNT: "5"
+      # Voix
+      AUDIO_STT_ENGINE: openai
+      AUDIO_STT_OPENAI_API_BASE_URL: http://127.0.0.1:8001/v1
+      AUDIO_STT_OPENAI_API_KEY: none
+      AUDIO_STT_MODEL: whisper-large-v3-turbo
+      AUDIO_TTS_ENGINE: openai
+      AUDIO_TTS_OPENAI_API_BASE_URL: http://127.0.0.1:8000/v1
+      AUDIO_TTS_OPENAI_API_KEY: none
+      AUDIO_TTS_MODEL: speaches-ai/Kokoro-82M-v1.0-ONNX
+      AUDIO_TTS_VOICE: ff_siwis
+      # Code
+      ENABLE_CODE_INTERPRETER: "true"
+      CODE_INTERPRETER_ENGINE: jupyter
+      CODE_INTERPRETER_JUPYTER_URL: http://127.0.0.1:8888
+      CODE_INTERPRETER_JUPYTER_AUTH: token
+      CODE_INTERPRETER_JUPYTER_AUTH_TOKEN: ${JUPYTER_TOKEN}
+      ENABLE_CODE_EXECUTION: "true"
+      CODE_EXECUTION_ENGINE: jupyter
+      CODE_EXECUTION_JUPYTER_URL: http://127.0.0.1:8888
+      CODE_EXECUTION_JUPYTER_AUTH: token
+      CODE_EXECUTION_JUPYTER_AUTH_TOKEN: ${JUPYTER_TOKEN}
+      # Génération d'images (ComfyUI + FLUX.1-schnell)
+      ENABLE_IMAGE_GENERATION: "true"
+      IMAGE_GENERATION_ENGINE: comfyui
+      COMFYUI_BASE_URL: http://127.0.0.1:8188
+      IMAGE_GENERATION_MODEL: qwen_image_2.1_turbo_int8_convrot.safetensors
+      IMAGE_SIZE: 1024x1024
+      IMAGE_STEPS: "8"
+      COMFYUI_WORKFLOW: '{"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors", "weight_dtype": "default"}}, "2": {"class_type": "QwenImage21Cache", "inputs": {"model": ["1", 0], "device": "auto", "dtype": "default"}}, "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_8b_int8_convrot.safetensors", "type": "qwen_image", "device": "default"}}, "4": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_2.1_vae_bf16.safetensors"}}, "5": {"class_type": "TextEncodeQwenImage21", "inputs": {"clip": ["3", 0], "prompt": "Prompt", "negative_prompt": "", "resolution": 1024}}, "6": {"class_type": "EmptyLatentImage", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}}, "7": {"class_type": "RandomNoise", "inputs": {"noise_seed": 42}}, "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}, "9": {"class_type": "ManualSigmas", "inputs": {"sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"}}, "10": {"class_type": "CFGGuider", "inputs": {"model": ["2", 0], "positive": ["5", 0], "negative": ["5", 1], "cfg": 1}}, "11": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["7", 0], "guider": ["10", 0], "sampler": ["8", 0], "sigmas": ["9", 0], "latent_image": ["6", 0]}}, "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["4", 0]}}, "13": {"class_type": "SaveImage", "inputs": {"images": ["12", 0], "filename_prefix": "owui"}}}'
+      COMFYUI_WORKFLOW_NODES: '[{"type": "prompt", "key": "prompt", "node_ids": ["5"]}, {"type": "model", "key": "unet_name", "node_ids": ["1"]}, {"type": "width", "key": "width", "node_ids": ["6"]}, {"type": "height", "key": "height", "node_ids": ["6"]}, {"type": "seed", "key": "noise_seed", "node_ids": ["7"]}]'
+      # MCP (via mcpo)
+      TOOL_SERVER_CONNECTIONS: '[{"url": "http://127.0.0.1:8300/time", "path": "openapi.json", "auth_type": "bearer", "key": "${MCPO_API_KEY}", "config": {"enable": true, "access_control": null}, "info": {"name": "time"}}, {"url": "http://127.0.0.1:8300/fetch", "path": "openapi.json", "auth_type": "bearer", "key": "${MCPO_API_KEY}", "config": {"enable": true, "access_control": null}, "info": {"name": "fetch"}}, {"url": "http://127.0.0.1:8300/filesystem", "path": "openapi.json", "auth_type": "bearer", "key": "${MCPO_API_KEY}", "config": {"enable": true, "access_control": null}, "info": {"name": "filesystem"}}, {"url": "http://127.0.0.1:8300/sequential-thinking", "path": "openapi.json", "auth_type": "bearer", "key": "${MCPO_API_KEY}", "config": {"enable": true, "access_control": null}, "info": {"name": "sequential-thinking"}}, {"url": "http://127.0.0.1:8300/browser", "path": "openapi.json", "auth_type": "bearer", "key": "${MCPO_API_KEY}", "config": {"enable": true, "access_control": null}, "info": {"name": "browser"}}, {"url": "http://127.0.0.1:8300/mail", "path": "openapi.json", "auth_type": "bearer", "key": "${MCPO_API_KEY}", "config": {"enable": true, "access_control": null}, "info": {"name": "mail"}}]'
+    depends_on: [qdrant, searxng, speaches, jupyter, mcpo]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports: ["127.0.0.1:6333:6333"]
+    volumes: [qdrant:/qdrant/storage]
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    ports: ["127.0.0.1:8081:8080"]
+    volumes: [./searxng:/etc/searxng]
+
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    restart: unless-stopped
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: [hf-cache:/home/ubuntu/.cache/huggingface/hub]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+
+  jupyter:
+    image: quay.io/jupyter/scipy-notebook:latest
+    restart: unless-stopped
+    ports: ["127.0.0.1:8888:8888"]
+    volumes: [./workspace:/home/jovyan/work]
+    command: start-notebook.py --IdentityProvider.token=${JUPYTER_TOKEN} --ServerApp.root_dir=/home/jovyan/work
+
+  mcpo:
+    build: ./mcpo
+    image: local/mcpo-browser:latest
+    shm_size: 1gb
+    restart: unless-stopped
+    ports: ["127.0.0.1:8300:8000"]
+    volumes: [./mcpo/config.json:/app/config.json:ro, ./workspace:/workspace, ./mcpo/mail:/app/mail:ro]
+    command: --host 0.0.0.0 --port 8000 --api-key ${MCPO_API_KEY} --config /app/config.json
+
+  comfyui:
+    image: local/comfyui:latest
+    oom_score_adj: 1000
+    build: ./comfyui
+    restart: unless-stopped
+    ports: ["127.0.0.1:8188:8188"]
+    ipc: host
+    volumes:
+      - ./comfyui/models:/opt/ComfyUI/models
+      - ./comfyui/user:/opt/ComfyUI/user
+      - ./comfyui/output:/opt/ComfyUI/output
+      - ./comfyui/input:/opt/ComfyUI/input
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+
+  caddy:
+    image: caddy:2
+    network_mode: host
+    restart: unless-stopped
+    volumes: [./caddy/Caddyfile:/etc/caddy/Caddyfile:ro, caddy-data:/data, ./studio/media:/srv/studio-media:ro]
+
+volumes:
+  caddy-data:
+  open-webui:
+  qdrant:
+  hf-cache:

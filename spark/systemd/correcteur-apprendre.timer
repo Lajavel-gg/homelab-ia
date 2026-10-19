@@ -1,0 +1,7 @@
+[Unit]
+Description=Apprentissage du Correcteur chaque nuit à 4h
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Ménage + vérification du dépôt de sauvegarde %i (restic, côté pve2)
+
+[Service]
+Type=oneshot
+User=sauvegarde
+LoadCredential=pass:/root/.config/restic/%i.pass
+Environment=RESTIC_REPOSITORY=/mnt/tank/sauvegardes/%i
+Environment=RESTIC_CACHE_DIR=/home/sauvegarde/.cache/restic
+ExecStart=/bin/sh -c "restic --password-file \"$${CREDENTIALS_DIRECTORY}/pass\" forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune && restic --password-file \"$${CREDENTIALS_DIRECTORY}/pass\" check --read-data-subset=10%%"
+Nice=10
+IOSchedulingClass=idle

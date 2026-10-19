@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""ovh-dns <sous-domaine> <type> <cible> [ttl] : crée ou met à jour un enregistrement de example.com (clé /root/ovh.env)."""
+import os, sys, hashlib, json, urllib.request
+for l in open("/root/ovh.env"):
+    if "=" in l: k, v = l.strip().split("=", 1); os.environ[k] = v
+AK, AS, CK = os.environ["OVH_AK"], os.environ["OVH_AS"], os.environ["OVH_CK"]
+B, Z = "https://eu.api.ovh.com/1.0", "example.com"
+def call(m, p, body=None):
+    b = json.dumps(body) if body is not None else ""
+    t = str(json.load(urllib.request.urlopen(B + "/auth/time")))
+    s = "$1$" + hashlib.sha1("+".join([AS, CK, m, B + p, b, t]).encode()).hexdigest()
+    r = urllib.request.Request(B + p, data=b.encode() or None, method=m, headers={"X-Ovh-Application": AK,
+        "X-Ovh-Consumer": CK, "X-Ovh-Timestamp": t, "X-Ovh-Signature": s, "Content-Type": "application/json"})
+    out = urllib.request.urlopen(r).read()
+    return json.loads(out) if out else None
+sub, typ, cible = sys.argv[1], sys.argv[2], sys.argv[3]
+ttl = int(sys.argv[4]) if len(sys.argv) > 4 else 300
+ids = call("GET", f"/domain/zone/{Z}/record?fieldType={typ}&subDomain={sub}")
+if ids:
+    cur = call("GET", f"/domain/zone/{Z}/record/{ids[0]}")
+    if cur["target"] == cible: print(f"{sub}.{Z} déjà {cible}"); sys.exit(0)
+    call("PUT", f"/domain/zone/{Z}/record/{ids[0]}", {"target": cible, "ttl": ttl})
+else:
+    call("POST", f"/domain/zone/{Z}/record", {"fieldType": typ, "subDomain": sub, "target": cible, "ttl": ttl})
+call("POST", f"/domain/zone/{Z}/refresh")
+print(f"{sub}.{Z} {typ} -> {cible}")

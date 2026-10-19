@@ -1,0 +1,68 @@
+#!/bin/bash
+# Sauvegarde nocturne du Spark vers pve2 (restic chiffré, dépôt en « ajout seulement » via rclone/SSH).
+# Le ménage de l'historique (forget/prune) et la vérification se font SUR pve2 (sauvegarde-menage.timer),
+# le Spark ne peut ni effacer ni modifier les anciennes sauvegardes. — 19/10/2026
+set -uo pipefail
+. /root/.config/restic/spark.env
+ETAT=/var/lib/sauvegarde-spark
+PREP=$ETAT/preparation
+mkdir -p "$PREP"
+log() { echo "$(date '+%F %T') $*"; }
+fin() {  # écrit l'état lu plus tard par la surveillance (ntfy)
+    printf '{"date": "%s", "ok": %s, "message": "%s"}\n' "$(date -Iseconds)" "$1" "$2" > "$ETAT/etat.json"
+}
+
+log "préparation"
+# 1) copie cohérente de la base Open WebUI (on ne sauvegarde pas le fichier vivant en pleine écriture)
+if docker exec open-webui python3 -c '
+import sqlite3
+s = sqlite3.connect("/app/backend/data/webui.db")
+d = sqlite3.connect("/app/backend/data/webui-sauvegarde.db")
+s.backup(d); d.close()'; then
+    log "base Open WebUI copiée"
+else
+    log "ERREUR copie base Open WebUI"; fin false "copie de la base Open WebUI impossible"; exit 1
+fi
+# 2) inventaire de ce qui n'est pas sauvegardé mais se réinstalle / retélécharge
+{
+    echo "== Modèles (non sauvegardés, à retélécharger) — $(date -I)"
+    find /opt/models /opt/ai-stack/comfyui/models -type f \( -name '*.gguf' -o -name '*.safetensors' -o -name '*.pt*' -o -name '*.bin' \) -printf '%s\t%p\n' 2>/dev/null | sort -k2
+    echo; echo "== Ollama"; ollama list 2>/dev/null
+    echo; echo "== Images Docker"; docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}'
+    echo; echo "== llama.cpp"; git -C /opt/llama.cpp log -1 --format='%H %cd' 2>/dev/null
+    echo; echo "== whisper.cpp"; git -C /opt/whisper.cpp log -1 --format='%H %cd' 2>/dev/null
+} > "$PREP/inventaire-modeles.txt"
+dpkg --get-selections > "$PREP/paquets.txt"
+crontab -l > "$PREP/crontab-root.txt" 2>/dev/null || true
+
+log "envoi vers pve2"
+restic -o rclone.program="$RCLONE_PROG" backup --verbose=0 --host spark --tag nuit \
+    --exclude-caches --one-file-system \
+    --exclude '/var/lib/docker/volumes/ai-stack_open-webui/_data/webui.db' \
+    --exclude '/var/lib/docker/volumes/ai-stack_open-webui/_data/webui.db-wal' \
+    --exclude '/var/lib/docker/volumes/ai-stack_open-webui/_data/webui.db-shm' \
+    --exclude '/var/lib/docker/volumes/ai-stack_open-webui/_data/cache' \
+    --exclude '/opt/ai-stack/comfyui/models' \
+    --exclude '/opt/ai-stack/lora/hf' --exclude '/opt/ai-stack/lora/models' --exclude '/opt/ai-stack/lora/ai-toolkit' \
+    --exclude '/opt/ai-stack/studio/venv-mesh' \
+    --exclude '__pycache__' --exclude '*.safetensors' --exclude '*.gguf' \
+    --exclude '/root/.cache' --exclude '/root/.nv' --exclude '/root/snap' --exclude '/root/.local' \
+    --exclude '/home/utilisateur/.cache' --exclude '/home/utilisateur/snap' --exclude '/home/utilisateur/.local' \
+    --exclude '/home/utilisateur/**/node_modules' --exclude '/home/utilisateur/**/.venv' \
+    /var/lib/docker/volumes/ai-stack_open-webui/_data \
+    /var/lib/docker/volumes/ai-stack_qdrant/_data \
+    /var/lib/docker/volumes/ai-stack_caddy-data/_data \
+    /opt/ai-stack \
+    /opt/models/qwen38-flash-next/chat_template.froggeric-v22.5.jinja \
+    /opt/models/qwen38-flash-next/chat_template.jinja \
+    /etc /usr/local/bin /root /home/utilisateur \
+    /var/log/correcteur-apprendre.log \
+    "$PREP"
+rc=$?
+docker exec open-webui rm -f /app/backend/data/webui-sauvegarde.db
+# 3 = certains fichiers illisibles (ex. fichier disparu pendant la lecture) : sauvegarde faite quand même
+if [ $rc -eq 0 ] || [ $rc -eq 3 ]; then
+    log "sauvegarde OK (code $rc)"; fin true "sauvegarde OK (code $rc)"
+else
+    log "ERREUR sauvegarde (code $rc)"; fin false "restic a échoué (code $rc)"; exit $rc
+fi

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Usage: wait-mem <Go>  — attend jusqu'à 120 s que <Go> de mémoire soient disponibles, sinon échoue.
+need=$1; i=0
+while :; do
+  a=$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo)
+  [ "$a" -ge "$need" ] && { echo "OK: ${a} Go disponibles (besoin ${need})"; exit 0; }
+  [ $i -ge 120 ] && { echo "ABANDON: seulement ${a} Go disponibles (besoin ${need})" >&2; exit 1; }
+  sleep 2; i=$((i+2))
+done

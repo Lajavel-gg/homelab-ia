@@ -1,0 +1,37 @@
+{
+	local_certs
+}
+
+(auth_maison) {
+	basic_auth {
+		utilisateur <HASH_BCRYPT: caddy hash-password>
+	}
+}
+
+https://192.168.0.18, https://spark.local, https://localhost {
+	tls internal
+	encode zstd gzip
+
+	# Fichiers produits par le Studio (noms aléatoires, non devinables)
+	handle_path /studio/media/* {
+		header Access-Control-Allow-Origin *
+		# ?dl=1 : forcer le téléchargement (bouton « Télécharger »)
+		@dl query dl=1
+		header @dl Content-Disposition "attachment"
+		root * /srv/studio-media
+		file_server
+	}
+	# Page du Studio (vidéos / 3D)
+	handle /studio* {
+		import auth_maison
+		reverse_proxy 127.0.0.1:8190
+	}
+	reverse_proxy 127.0.0.1:8080
+}
+
+# ComfyUI (port 8443)
+https://192.168.0.18:8443, https://spark.local:8443, https://localhost:8443 {
+	tls internal
+	import auth_maison
+	reverse_proxy 127.0.0.1:8188
+}

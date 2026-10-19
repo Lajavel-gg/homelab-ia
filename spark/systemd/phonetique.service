@@ -1,0 +1,11 @@
+[Unit]
+Description=Dictionnaire des sons (Lexique + espeak-ng) pour le Correcteur
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/ai-stack/phonetique/phonetique.py
+Restart=on-failure
+DynamicUser=yes
+
+[Install]
+WantedBy=multi-user.target

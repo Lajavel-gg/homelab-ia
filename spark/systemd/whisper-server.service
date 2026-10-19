@@ -1,0 +1,11 @@
+[Unit]
+Description=whisper.cpp STT server (CUDA, OpenAI-compatible)
+After=network-online.target
+
+[Service]
+ExecStart=/opt/whisper.cpp/build/bin/whisper-server -m /opt/whisper.cpp/models/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8001 --inference-path /v1/audio/transcriptions -l auto -fa -t 8
+Restart=always
+DynamicUser=yes
+
+[Install]
+WantedBy=multi-user.target

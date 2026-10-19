@@ -1,0 +1,11 @@
+[Unit]
+Description=Studio - file d'attente vidéo/3D ComfyUI (met le chat en pause pendant les tâches)
+After=docker.service llama-flashnext.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/ai-stack/studio/runner.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

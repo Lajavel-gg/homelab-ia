@@ -6,6 +6,9 @@ After=docker.service llama-flashnext.service
 ExecStart=/usr/bin/python3 /opt/ai-stack/studio/runner.py
 Restart=on-failure
 RestartSec=5
+# Après 60 jours, les créations non gardées partent sur pve2 (voir README, « Studio »). Sans STUDIO_ARCHIVE : supprimées.
+#Environment=STUDIO_ARCHIVE=studio@IP_DE_PVE2:
+#Environment=STUDIO_GARDER_JOURS=60
 
 [Install]
 WantedBy=multi-user.target

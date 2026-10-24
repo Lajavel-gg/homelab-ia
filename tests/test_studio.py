@@ -123,23 +123,84 @@ def page_js():
 def test_page_sans_injection_html(tmp_path):
     (tmp_path / "page.js").write_text(page_js())
     (tmp_path / "t.js").write_text("""
-const fs=require('fs');let html='',p='';
-global.document={getElementById:id=>({set innerHTML(v){html=v},set textContent(v){p=v}})};global.setInterval=()=>{};
-global.fetch=async u=>u.includes('place')?{json:async()=>({octets:2**30,garder_jours:60})}:{text:async()=>JSON.stringify({
+const fs=require('fs');
+eval(fs.readFileSync(process.argv[2],'utf8')+';globalThis.T={rendre,statsHtml,filtresHtml,sousTitre,regler:v=>{infos=v}}');
+const I={archive:true,garder_jours:60,octets:2**30};T.regler(I);
+const jobs={
  'aaaaaaaaaa':{type:'video',statut:'terminé',prompt:'<img src=x onerror=alert(1)>',etape:'"><script>x</script>',cree:1,format:'video',fichier:'/studio/media/0123456789abcdef0123456789abcdef.mp4'},
- 'bbbbbbbbbb':{type:'image',statut:'terminé',fichier:'javascript:alert(1)',format:'image',cree:1},
- "x');alert(1);('":{type:'image',statut:'terminé',cree:1}})};
-eval(fs.readFileSync(process.argv[2],'utf8'));
-setTimeout(()=>{console.log(JSON.stringify({html,p}))},100);""")
+ 'bbbbbbbbbb':{type:'image',statut:'terminé',fichier:'javascript:alert(1)',format:'image',cree:2},
+ 'cccccccccc':{type:'3d',statut:'archivé',prompt:'coffre',cree:3,archive:'2026/08/',archive_fichiers:['<b>x</b>.glb']},
+ 'dddddddddd':{type:'image',statut:'échec',etape:'<svg onload=alert(1)>',cree:4},
+ "x');alert(1);('":{type:'image',statut:'terminé',cree:5}};
+console.log(JSON.stringify({tout:T.rendre(jobs,'tout'),archives:T.rendre(jobs,'archive'),echecs:T.rendre(jobs,'echec'),
+  stats:T.statsHtml(jobs,I),filtres:T.filtresHtml(jobs),sous:T.sousTitre(I)}));""")
     out = json.loads(subprocess.run(["node", tmp_path / "t.js", tmp_path / "page.js"], capture_output=True, text=True,
                                     check=True).stdout)
-    assert "<img src=x" not in out["html"] and "<script>" not in out["html"] and "javascript:" not in out["html"]
-    assert "alert(1);(" not in out["html"]  # identifiant piégé ignoré
-    assert "0123456789abcdef0123456789abcdef.mp4" in out["html"] and "Supprimer" in out["html"]
-    assert "1,0 Go" in out["p"]
+    tout = out["tout"] + out["archives"] + out["echecs"]
+    for piege in ("<img src=x", "<script>", "javascript:", "<svg", "<b>x</b>", "alert(1);("):
+        assert piege not in tout, piege
+    assert "0123456789abcdef0123456789abcdef.mp4" in out["tout"] and "Supprimer" in out["tout"]
+    assert "Archiver" in out["tout"] and "coffre" not in out["tout"]  # les archivées ont leur filtre
+    assert "coffre" in out["archives"] and "2026/08/" in out["archives"]
+    assert "1,0 Go" in out["stats"] and "pve2" in out["sous"]
 
 
 def test_page_chemins_absolus():
     # en relatif, la page ouverte sur « /studio » (sans / final) cherchait /api/jobs et restait vide
     js = page_js()
-    assert "fetch('api/" not in js and js.count("fetch('/studio/api/") >= 3
+    assert "fetch('api/" not in js and "'api/" not in js
+    assert "fetch('/studio/api/jobs')" in js and "fetch('/studio/api/place')" in js and "'/studio/api/jobs/'+id" in js
+
+
+# ------------------------------------------------------------------ archivage sur pve2
+
+def test_archiver_sur_pve2(studio, tmp_path, monkeypatch):
+    if not shutil.which("rsync"):
+        pytest.skip("rsync absent")
+    media, _ = studio
+    pve2 = tmp_path / "pve2"
+    monkeypatch.setattr(runner, "ARCHIVE", str(pve2) + "/")  # destination locale : même rsync, sans SSH
+    f = creation(media, "eeeeeeeeee", 90)
+    runner.jobs["eeeeeeeeee"]["prompt"] = "un phare au coucher du soleil"
+    assert runner.archiver_job("eeeeeeeeee") == "ok"
+    mois = time.strftime("%Y/%m", time.localtime(runner.jobs["eeeeeeeeee"]["cree"]))
+    envoyes = sorted(p.name for p in (pve2 / mois).iterdir())
+    assert [n for n in envoyes if n.endswith(".mp4")] and [n for n in envoyes if n.endswith(".json")]
+    fiche = json.loads(next((pve2 / mois).glob("*.json")).read_text())
+    assert fiche["prompt"] == "un phare au coucher du soleil"
+    assert not f.exists()  # retiré du Spark seulement après l'envoi
+    assert runner.jobs["eeeeeeeeee"]["statut"] == "archivé" and "fichier" not in runner.jobs["eeeeeeeeee"]
+
+
+def test_archivage_rate_rien_n_est_supprime(studio, monkeypatch):
+    if not shutil.which("rsync"):
+        pytest.skip("rsync absent")
+    media, _ = studio
+    monkeypatch.setattr(runner, "ARCHIVE", "/proc/impossible/")
+    f = creation(media, "ffffffffff", 90)
+    assert runner.archiver_job("ffffffffff").startswith("envoi vers pve2 impossible")
+    assert f.exists() and runner.jobs["ffffffffff"]["statut"] == "terminé"
+    assert runner.nettoyer(jours=60) == (0, 0)  # le ménage réessaiera plus tard, sans rien perdre
+    assert f.exists()
+
+
+def test_menage_avec_archivage(studio, tmp_path, monkeypatch):
+    if not shutil.which("rsync"):
+        pytest.skip("rsync absent")
+    media, _ = studio
+    monkeypatch.setattr(runner, "ARCHIVE", str(tmp_path / "pve2") + "/")
+    creation(media, "1111111111", 90)
+    creation(media, "2222222222", 90, statut="échec")
+    creation(media, "3333333333", 90, garder=True)
+    assert runner.nettoyer(jours=60)[0] == 2
+    assert runner.jobs["1111111111"]["statut"] == "archivé"  # terminée → archivée
+    assert "2222222222" not in runner.jobs  # échec → rien à garder
+    assert runner.jobs["3333333333"]["statut"] == "terminé"  # gardée → reste sur le Spark
+    assert runner.nettoyer(jours=60)[0] == 0  # une archivée n'est pas archivée deux fois
+
+
+def test_api_archiver_sans_configuration(api, studio, monkeypatch):
+    media, _ = studio
+    monkeypatch.setattr(runner, "ARCHIVE", "")
+    creation(media, "abcdefabcd", 1)
+    assert api("POST", "/studio/api/jobs/abcdefabcd/archiver")[0] == 501

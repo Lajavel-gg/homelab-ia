@@ -203,9 +203,42 @@ Pour la partie Proxmox (serveurs, machines, stockages, sauvegardes vzdump de la 
 
 Gmail ne fait pas toujours sonner le téléphone pour un message déposé de cette façon : il apparaît en haut de la réception, en gras, mais sans notification. Si tu veux une notification, on ajoutera ntfy plus tard.
 
-### 7. Studio : supprimer, garder, ménage automatique
+### 7. Studio : galerie, archivage sur pve2, ménage automatique
 
-Sur la page `/studio`, chaque création a maintenant deux boutons : **Supprimer** et **☆ Garder**. Toutes les 6 h, le Studio supprime tout seul les créations de plus de **60 jours** qui ne sont pas marquées « gardée », ainsi que les fichiers bruts de ComfyUI qu'il a produits (`output/studio/`). Le reste de ComfyUI n'est jamais touché. Pour changer la durée : `Environment=STUDIO_GARDER_JOURS=90` dans `studio-runner.service` (`0` = jamais).
+La page `/studio` est une galerie : filtres (images, vidéos, 3D, gardées, archivées, échecs), et sur chaque création **Télécharger**, **Archiver**, **☆** (garder) et **✕** (supprimer). Toutes les 6 h, les créations de plus de **60 jours** non marquées ★ partent sur **pve2** (fichier + fiche `.json` avec le prompt, rangés par `AAAA/MM/`), puis sont retirées du Spark. Les échecs sont simplement supprimés. Si l'envoi rate, rien n'est supprimé : le ménage réessaie plus tard.
+
+Le Spark n'a le droit que d'**ajouter** des fichiers sur pve2 (`rrsync -wo`) : il ne peut ni lire, ni modifier, ni effacer les archives, comme pour les sauvegardes.
+
+Sur **pve2** (root) :
+
+```bash
+apt install rsync                       # fournit aussi rrsync
+useradd -m -s /bin/sh studio
+mkdir -p /mnt/tank/studio && chown studio: /mnt/tank/studio
+```
+
+Sur le **Spark** :
+
+```bash
+sudo ssh-keygen -t ed25519 -N "" -C studio-archive -f /opt/ai-stack/studio/archive_ed25519
+sudo cat /opt/ai-stack/studio/archive_ed25519.pub     # à copier sur pve2, ligne ci-dessous
+```
+
+Sur **pve2**, dans `/home/studio/.ssh/authorized_keys` (une seule ligne) :
+
+```
+restrict,command="rrsync -wo /mnt/tank/studio" ssh-ed25519 AAAA…(la clé)… studio-archive
+```
+
+Puis sur le **Spark** : enregistrer l'empreinte de pve2 (répondre `yes`, le message d'erreur de rrsync qui suit est normal), activer l'archivage et tester avec le bouton **Archiver** sur une vieille création :
+
+```bash
+sudo ssh -i /opt/ai-stack/studio/archive_ed25519 studio@IP_DE_PVE2
+sudo systemctl edit studio-runner        # ajouter : [Service]  Environment=STUDIO_ARCHIVE=studio@IP_DE_PVE2:
+sudo systemctl restart studio-runner
+```
+
+Les archives se consultent sur pve2 dans `/mnt/tank/studio/` (ou en partage réseau si tu en ajoutes un). Durée avant archivage : `Environment=STUDIO_GARDER_JOURS=90` (`0` = jamais).
 
 ### 8. À faire ensuite (moins urgent)
 

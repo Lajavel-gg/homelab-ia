@@ -27,6 +27,7 @@ import traceback
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = "/opt/ai-stack/studio"
@@ -40,8 +41,12 @@ LLAMA_UNIT = "llama-flashnext"
 # Lecteur 3D servi en local (avant : CDN, donc pas de 3D sans internet). Copié dans MEDIA au démarrage,
 # car Caddy sert /studio/media sans mot de passe (l'iframe du chat ne peut pas en donner).
 VIEWER = "model-viewer-4.0.0.min.js"
-# Ménage automatique : les créations plus vieilles que ça sont supprimées (sauf celles marquées « garder »). 0 = jamais.
+# Ménage automatique : les créations plus vieilles que ça quittent le Spark (sauf celles marquées « garder »). 0 = jamais.
 GARDER_JOURS = int(os.environ.get("STUDIO_GARDER_JOURS", "60"))
+# Archivage sur le serveur Proxmox (pve2) au lieu de la suppression : destination rsync, ex. « studio@192.168.0.201: ».
+# La clé SSH n'a le droit que d'AJOUTER des fichiers (rrsync -wo côté pve2, voir le README). Vide = suppression.
+ARCHIVE = os.environ.get("STUDIO_ARCHIVE", "").strip()
+ARCHIVE_CLE = os.environ.get("STUDIO_ARCHIVE_CLE", "/opt/ai-stack/studio/archive_ed25519")
 RE_JID = re.compile(r"[0-9a-f]{10}")
 RE_MEDIA = re.compile(r"/studio/media/([0-9a-f]{32}\.[a-z0-9]{2,4})")
 
@@ -403,19 +408,86 @@ def supprimer_job(jid):
     return "ok"
 
 
+def _nom_lisible(j, jid, chemin):
+    """« 2026-10-24_video_ab12cd34ef.mp4 » : retrouvable à la main dans les archives."""
+    return f"{datetime.fromtimestamp(j.get('cree', 0)):%Y-%m-%d}_{re.sub(r'[^a-z0-9]', '', str(j.get('type', 'x')))}_{jid}" \
+        + os.path.splitext(chemin)[1]
+
+
+def archiver_job(jid):
+    """Envoie la création sur pve2 (fichiers + fiche .json avec le prompt), puis la retire du Spark.
+    Rien n'est supprimé si l'envoi échoue. Renvoie « ok », « inconnu », « en cours », « pas configuré » ou l'erreur."""
+    if not ARCHIVE:
+        return "pas configuré"
+    with lock:
+        j = dict(jobs.get(jid) or {})
+    if not j:
+        return "inconnu"
+    if j.get("statut") in ("en attente", "en cours"):
+        return "en cours"
+    sous = f"{datetime.fromtimestamp(j.get('cree', 0)):%Y/%m}"
+    envoi = os.path.join(os.path.dirname(MEDIA), "archive-envoi", jid)
+    shutil.rmtree(envoi, ignore_errors=True)
+    os.makedirs(envoi)
+    try:
+        noms = []
+        for f in fichiers_du_job(j):
+            if os.path.exists(f):
+                nom = _nom_lisible(j, jid, f) if not noms else _nom_lisible(j, jid + "_apercu", f)
+                try:
+                    os.link(f, os.path.join(envoi, nom))  # lien dur : pas de copie sur le disque
+                except OSError:
+                    shutil.copy2(f, os.path.join(envoi, nom))
+                noms.append(nom)
+        fiche = {k: j.get(k) for k in ("type", "prompt", "style", "scenes", "qualite", "secondes", "format", "modele", "statut", "etape")}
+        fiche.update(id=jid, cree=datetime.fromtimestamp(j.get("cree", 0)).isoformat(timespec="seconds"), fichiers=noms)
+        with open(os.path.join(envoi, _nom_lisible(j, jid, "fiche.json")), "w") as f:
+            json.dump(fiche, f, ensure_ascii=False, indent=1)
+        r = subprocess.run(["rsync", "-t", "--mkpath", "--partial", "-e",
+                            f"ssh -i {ARCHIVE_CLE} -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=yes",
+                            *sorted(os.path.join(envoi, n) for n in os.listdir(envoi)), f"{ARCHIVE}{sous}/"],
+                           capture_output=True, text=True, timeout=3600)
+        if r.returncode:
+            return f"envoi vers pve2 impossible : {(r.stderr or r.stdout).strip()[-200:]}"
+    finally:
+        shutil.rmtree(envoi, ignore_errors=True)
+    with lock:
+        if jid not in jobs:
+            return "inconnu"
+        jobs[jid].update(statut="archivé", archive=f"{sous}/", archive_fichiers=noms, archive_le=time.time())
+        jobs[jid].pop("fichier", None)
+        jobs[jid].pop("apercu", None)
+    for f in fichiers_du_job(j):
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+    save()
+    return "ok"
+
+
 def nettoyer(jours=None, maintenant=None):
-    """Supprime les créations de plus de `jours` jours non marquées « garder », les fichiers de MEDIA qui
+    """Archive sur pve2 (ou supprime si l'archivage n'est pas configuré) les créations de plus de `jours` jours
+    non marquées « garder », puis supprime les fichiers de MEDIA qui
     n'appartiennent plus à aucune création, et les sorties brutes de ComfyUI du Studio du même âge.
     Les rendus publiés sont des liens durs : effacer l'original de ComfyUI ne les touche pas.
-    Renvoie (créations supprimées, fichiers supprimés)."""
+    Renvoie (créations archivées ou supprimées, fichiers supprimés)."""
     jours = GARDER_JOURS if jours is None else jours
     if jours <= 0:
         return 0, 0
     limite = (maintenant or time.time()) - jours * 86400
     with lock:
         vieux = [k for k, j in jobs.items() if j.get("cree", 0) < limite and not j.get("garder")
-                 and j.get("statut") not in ("en attente", "en cours")]
-    n_jobs = sum(1 for k in vieux if supprimer_job(k) == "ok")
+                 and j.get("statut") not in ("en attente", "en cours", "archivé")]
+    n_jobs = 0
+    for k in vieux:
+        if ARCHIVE and jobs.get(k, {}).get("statut") == "terminé":
+            r = archiver_job(k)  # en cas d'échec on ne supprime rien : on réessaiera au prochain ménage
+            if r != "ok":
+                log(f"archivage de {k} : {r}")
+        else:  # échecs (rien à garder), ou archivage non configuré
+            r = supprimer_job(k)
+        n_jobs += r == "ok"
     n_fichiers = 0
     with lock:
         utilises = {os.path.basename(f) for j in jobs.values() for f in fichiers_du_job(j)} | {VIEWER}
@@ -441,7 +513,8 @@ def menage():
         try:
             n_jobs, n_fichiers = nettoyer()
             if n_jobs or n_fichiers:
-                log(f"ménage : {n_jobs} création(s) et {n_fichiers} fichier(s) de plus de {GARDER_JOURS} jours supprimés")
+                log(f"ménage : {n_jobs} création(s) {'archivée(s) sur pve2' if ARCHIVE else 'supprimée(s)'} et "
+                    f"{n_fichiers} fichier(s) de plus de {GARDER_JOURS} jours supprimés")
         except Exception:  # noqa: BLE001
             traceback.print_exc()
         time.sleep(6 * 3600)
@@ -462,36 +535,109 @@ def place_utilisee():
 
 # ---------------------------------------------------------------- HTTP
 
-PAGE = """<!doctype html><html lang=fr><head><meta charset=utf-8>
+PAGE = r"""<!doctype html><html lang=fr><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Studio</title>
 <script type=module src="/studio/media/model-viewer-4.0.0.min.js"></script>
-<style>body{font-family:system-ui;background:#111;color:#eee;margin:0;padding:16px}
-.c{background:#1c1c1c;border-radius:12px;padding:12px;margin:0 0 16px;max-width:900px}
-video,model-viewer{width:100%;max-height:70vh;height:60vh;background:#000;border-radius:8px}
-small{color:#999}a{color:#8cf}.b{float:right}.b button{background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:8px;padding:4px 10px;margin-left:6px;cursor:pointer}
-.b button.s{color:#ff8a8a;border-color:#5a2a2a}#p{color:#999;font-size:13px;margin:-8px 0 16px}</style></head><body><h1>🎬 Studio</h1><div id=p></div><div id=l></div>
+<style>
+:root{--fond:#0e0e10;--carte:#18181b;--carte2:#202024;--bord:#2a2a2f;--texte:#f2f2f3;--texte2:#a1a1aa;--discret:#71717a;
+--accent:#7c6cf0;--accent2:#2d2a45;--bon:#22c55e;--attention:#f5b942;--critique:#f05252;--rayon:14px;color-scheme:dark}
+@media (prefers-color-scheme:light){:root{--fond:#f4f4f5;--carte:#fff;--carte2:#f4f4f5;--bord:#e4e4e7;--texte:#18181b;
+--texte2:#52525b;--discret:#8a8a93;--accent2:#ece9fe;color-scheme:light}}
+*{box-sizing:border-box}body{margin:0;background:var(--fond);color:var(--texte);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.page{max-width:1200px;margin:0 auto;padding:28px 20px 60px}
+header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:20px}
+h1{font-size:28px;margin:0;letter-spacing:-.02em}.sous{color:var(--texte2);font-size:14px;margin-top:4px}
+.stats{display:flex;gap:10px;flex-wrap:wrap}.stat{background:var(--carte);border:1px solid var(--bord);border-radius:12px;padding:8px 14px}
+.stat b{display:block;font-size:18px}.stat span{font-size:12px;color:var(--discret)}
+.filtres{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px}
+.filtres button{background:var(--carte);color:var(--texte2);border:1px solid var(--bord);border-radius:999px;padding:6px 14px;font:inherit;font-size:13px;cursor:pointer}
+.filtres button.actif{background:var(--accent2);color:var(--texte);border-color:var(--accent)}
+.filtres button i{font-style:normal;color:var(--discret);margin-left:4px}
+.grille{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;align-items:start}
+.c{background:var(--carte);border:1px solid var(--bord);border-radius:var(--rayon);overflow:hidden;display:flex;flex-direction:column}
+.c.encours{border-color:var(--accent)}
+.media{background:#000;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;min-height:0}
+.media img,.media video,.media model-viewer{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
+.media.court{aspect-ratio:auto;height:76px;background:var(--carte2)}
+.media .vide{color:var(--discret);font-size:13px;text-align:center;padding:20px}
+.barre{position:absolute;left:0;right:0;bottom:0;height:3px;background:var(--accent);animation:p 1.6s ease-in-out infinite;transform-origin:left}
+@keyframes p{0%{transform:scaleX(.05)}50%{transform:scaleX(.7)}100%{transform:scaleX(.05);transform-origin:right}}
+.corps{padding:12px 14px 14px;display:flex;flex-direction:column;gap:8px;flex:1}
+.haut{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--discret)}
+.badge{font-size:11px;font-weight:600;border-radius:6px;padding:2px 7px;background:var(--carte2);color:var(--texte2);text-transform:uppercase;letter-spacing:.04em}
+.etat{display:inline-flex;align-items:center;gap:5px}.etat:before{content:"";width:7px;height:7px;border-radius:50%;background:var(--couleur,var(--discret))}
+.prompt{font-size:14px;color:var(--texte);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
+.prompt.ouvert{-webkit-line-clamp:unset}
+.detail{font-size:12px;color:var(--discret)}.detail.err{color:var(--critique)}
+.actions{display:flex;gap:6px;align-items:center;margin-top:auto;padding-top:4px}.actions .fin{margin-left:auto;display:flex;gap:6px}
+.actions a,.actions button{font:inherit;font-size:13px;background:var(--carte2);color:var(--texte);border:1px solid var(--bord);border-radius:8px;padding:5px 11px;cursor:pointer;text-decoration:none;white-space:nowrap}
+.actions .ico{width:32px;padding:5px 0;text-align:center;font-size:15px;line-height:1.2}
+.actions button:hover,.actions a:hover{border-color:var(--accent)}
+.actions .on{color:var(--attention);border-color:var(--attention)}.actions .danger{color:var(--critique)}
+.vide-liste{color:var(--texte2);text-align:center;padding:60px 0}
+@media (max-width:520px){.page{padding:18px 12px 40px}.grille{grid-template-columns:1fr}h1{font-size:24px}}
+</style></head><body><div class=page>
+<header><div><h1>Studio</h1><div class=sous id=p></div></div><div class=stats id=s></div></header>
+<div class=filtres id=f></div><div class=grille id=l></div></div>
 <script>
-// Tout est échappé : prompt, étape et messages d'erreur peuvent contenir du texte venu du web.
-// La page est sur la même adresse qu'Open WebUI, une injection HTML pourrait y voler la session.
+// Tout ce qui vient d'une création (prompt, étape, erreurs) est échappé : la page est sur la même adresse
+// qu'Open WebUI, une injection HTML pourrait y voler la session. Seuls les liens /studio/media/<hex> sont acceptés.
 const e=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const media=f=>/^\\/studio\\/media\\/[0-9a-f]{32}\\.[a-z0-9]{2,4}$/.test(f||'')?f:'';
-let avant='';
-async function go(){const r=await (await fetch('/studio/api/jobs')).text();
-// on ne redessine que si quelque chose a changé : sinon une vidéo en lecture repartait de zéro toutes les 10 s
-if(r===avant)return;avant=r;const j=JSON.parse(r);
-document.getElementById('l').innerHTML=Object.entries(j).reverse().map(([id,x])=>{
-if(!/^[0-9a-f]{10}$/.test(id))return'';
-let m='';const f=media(x.fichier);if(x.statut=='terminé'&&f){m=x.format=='image'?`<img src="${f}" style="max-width:100%;border-radius:8px">`:x.format=='glb'?`<model-viewer src="${f}" camera-controls auto-rotate shadow-intensity=1></model-viewer>`:`<video src="${f}" controls loop playsinline preload=metadata></video>`;
-m+=`<br><a href="${f}" download>⬇️ Télécharger</a>`}
-const fini=x.statut=='terminé'||x.statut=='échec';
-const b=fini?`<div class=b><button onclick="garde('${id}',${!x.garder})">${x.garder?'★ Gardée':'☆ Garder'}</button><button class=s onclick="sup('${id}')">Supprimer</button></div>`:'';
-return `<div class=c><b>${e(x.type)}</b> — ${e(x.statut)}${b}<br>${e(x.prompt)}<br><small>${e(x.etape)} · ${new Date(x.cree*1000).toLocaleString()}</small><br>${m}</div>`}).join('')}
-async function sup(id){if(!confirm('Supprimer définitivement cette création ?'))return;
-const r=await fetch('/studio/api/jobs/'+id,{method:'DELETE'});if(!r.ok)alert((await r.json()).erreur);avant='';go();place()}
-async function garde(id,v){await fetch('/studio/api/jobs/'+id+'/garder',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({garder:v})});avant='';go()}
-async function place(){const p=await (await fetch('/studio/api/place')).json();
-document.getElementById('p').textContent=(p.octets/2**30).toFixed(1).replace('.',',')+' Go utilisés'+(p.garder_jours>0?` · les créations de plus de ${p.garder_jours} jours sont supprimées automatiquement, sauf celles marquées ★`:'')}
-go();place();setInterval(go,10000)
+const media=f=>/^\/studio\/media\/[0-9a-f]{32}\.[a-z0-9]{2,4}$/.test(f||'')?f:'';
+const TYPES={image:'Image',video:'Vidéo',video_image:'Animation',video_longue:'Vidéo longue','3d':'3D','3d_texte':'3D'};
+const FAMILLE=t=>t=='image'?'image':(t||'').startsWith('3d')?'3d':'video';
+const ETATS={'terminé':['Terminée','var(--bon)'],'échec':['Échec','var(--critique)'],'en cours':['En cours','var(--accent)'],
+ 'en attente':['En attente','var(--attention)'],'archivé':['Archivée sur pve2','var(--discret)']};
+const FILTRES=[['tout','Tout'],['image','Images'],['video','Vidéos'],['3d','3D'],['garde','Gardées'],['archive','Archivées'],['echec','Échecs']];
+let filtre='tout',jobs={},avant='',infos={};
+function ilya(t){const s=Date.now()/1000-t;if(s<90)return"à l'instant";if(s<3600)return`il y a ${Math.round(s/60)} min`;
+ if(s<86400)return`il y a ${Math.round(s/3600)} h`;if(s<86400*30)return`il y a ${Math.round(s/86400)} j`;
+ return new Date(t*1000).toLocaleDateString('fr-FR',{day:'numeric',month:'short',year:'numeric'})}
+function garde(x){return!!x.garder}
+function dans(x,f){return f=='tout'?x.statut!='archivé':f=='garde'?garde(x)&&x.statut!='archivé':f=='archive'?x.statut=='archivé':
+ f=='echec'?x.statut=='échec':x.statut!='archivé'&&FAMILLE(x.type)==f}
+function apercu(x){const f=media(x.fichier);
+ if(x.statut=='terminé'&&f)return x.format=='image'?`<img src="${f}" loading=lazy alt="">`:x.format=='glb'?
+  `<model-viewer src="${f}" camera-controls auto-rotate shadow-intensity=1></model-viewer>`:`<video src="${f}" controls loop playsinline preload=metadata></video>`;
+ if(x.statut=='en cours'||x.statut=='en attente')return`<div class=vide>${e(x.etape||'…')}</div><div class=barre></div>`;
+ if(x.statut=='archivé')return`<div class=vide>Archivée sur pve2<br>${e(x.archive||'')}</div>`;
+ return`<div class=vide>Pas d'aperçu</div>`}
+function carte(id,x){if(!/^[0-9a-f]{10}$/.test(id))return'';
+ const [nomEtat,couleur]=ETATS[x.statut]||[x.statut,'var(--discret)'],f=media(x.fichier),fini=x.statut=='terminé'||x.statut=='échec';
+ let a='',b='';
+ if(x.statut=='terminé'&&f)a+=`<a href="${f}?dl=1" download>Télécharger</a>`;
+ if(x.statut=='terminé'&&infos.archive)a+=`<button onclick="arc('${id}')" title="Envoyer sur pve2 et libérer le Spark">Archiver</button>`;
+ if(fini)b+=`<button class="ico ${garde(x)?'on':''}" onclick="gar('${id}',${!garde(x)})" title="${garde(x)?'Gardée : jamais archivée ni supprimée automatiquement':'Garder sur le Spark'}" aria-label="Garder">${garde(x)?'★':'☆'}</button>`;
+ if(fini||x.statut=='archivé')b+=`<button class="ico danger" onclick="sup('${id}')" title="Supprimer" aria-label="Supprimer">✕</button>`;
+ a+=`<span class=fin>${b}</span>`;
+ const detail=x.statut=='échec'?`<div class="detail err">${e(x.etape)}</div>`:x.statut=='archivé'?`<div class=detail>${e((x.archive_fichiers||[]).join(', '))}</div>`:'';
+ const court=!(x.statut=='terminé'&&f)&&x.statut!='en cours';
+ return`<div class="c${x.statut=='en cours'?' encours':''}"><div class="media${court?' court':''}">${apercu(x)}</div><div class=corps>
+<div class=haut><span class=badge>${e(TYPES[x.type]||x.type)}</span><span class=etat style="--couleur:${couleur}">${e(nomEtat)}</span>
+<span style="margin-left:auto" title="${e(new Date(x.cree*1000).toLocaleString('fr-FR'))}">${e(ilya(x.cree))}</span></div>
+<div class=prompt onclick="this.classList.toggle('ouvert')">${e(x.prompt||x.style||'(sans description)')}</div>${detail}
+<div class=actions>${a}</div></div></div>`}
+function rendre(j,f){const l=Object.entries(j).filter(([,x])=>dans(x,f)).sort((a,b)=>(b[1].cree||0)-(a[1].cree||0));
+ return l.length?l.map(([id,x])=>carte(id,x)).join(''):`<div class=vide-liste>Rien ici pour l'instant.</div>`}
+function filtresHtml(j){return FILTRES.map(([k,n])=>{const c=Object.values(j).filter(x=>dans(x,k)).length;
+ return`<button class="${k==filtre?'actif':''}" onclick="filtrer('${k}')">${n}<i>${c}</i></button>`}).join('')}
+function statsHtml(j,p){const v=Object.values(j),go=(p.octets||0)/2**30;
+ return`<div class=stat><b>${v.filter(x=>x.statut=='terminé').length}</b><span>créations</span></div>`+
+ `<div class=stat><b>${go.toFixed(1).replace('.',',')} Go</b><span>sur le Spark</span></div>`+
+ (p.archive?`<div class=stat><b>${v.filter(x=>x.statut=='archivé').length}</b><span>archivées sur pve2</span></div>`:'')}
+function sousTitre(p){return p.garder_jours>0?`Après ${p.garder_jours} jours, les créations ${p.archive?'partent sur pve2':'sont supprimées'}, sauf celles marquées ★.`:''}
+async function charger(force){const r=await (await fetch('/studio/api/jobs')).text();
+ // on ne redessine que si quelque chose a changé : sinon une vidéo en lecture repartirait de zéro
+ if(r===avant&&!force)return;avant=r;jobs=JSON.parse(r);dessiner()}
+function dessiner(){document.getElementById('l').innerHTML=rendre(jobs,filtre);document.getElementById('f').innerHTML=filtresHtml(jobs);
+ document.getElementById('s').innerHTML=statsHtml(jobs,infos);document.getElementById('p').textContent=sousTitre(infos)}
+async function place(){infos=await (await fetch('/studio/api/place')).json();dessiner()}
+function filtrer(k){filtre=k;dessiner()}
+async function act(url,opt){const r=await fetch(url,opt);if(!r.ok){const t=await r.json().catch(()=>({}));alert(t.erreur||'Erreur')}await charger(true);place()}
+function sup(id){if(confirm('Supprimer définitivement cette création ?'))act('/studio/api/jobs/'+id,{method:'DELETE'})}
+function arc(id){if(confirm('Envoyer cette création sur pve2 et la retirer du Spark ?'))act('/studio/api/jobs/'+id+'/archiver',{method:'POST'})}
+function gar(id,v){act('/studio/api/jobs/'+id+'/garder',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({garder:v})})}
+if(typeof window!=='undefined'&&window.addEventListener){charger();place();setInterval(charger,10000)}
 </script></body></html>"""
 
 
@@ -515,7 +661,7 @@ class H(BaseHTTPRequestHandler):
             with lock:
                 return self.send(200, {k: {x: y for x, y in v.items() if x != "image_b64"} for k, v in jobs.items()})
         if p == "/studio/api/place":
-            return self.send(200, {"octets": place_utilisee(), "garder_jours": GARDER_JOURS})
+            return self.send(200, {"octets": place_utilisee(), "garder_jours": GARDER_JOURS, "archive": bool(ARCHIVE)})
         if p.startswith("/studio/api/jobs/"):
             jid = p.rsplit("/", 1)[1]
             with lock:
@@ -537,6 +683,13 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("content-length", 0))
+        m = re.fullmatch(r"/studio/api/jobs/([0-9a-f]{10})/archiver", self.path.split("?")[0].rstrip("/"))
+        if m:
+            r = archiver_job(m.group(1))
+            codes = {"ok": 200, "inconnu": 404, "en cours": 409, "pas configuré": 501}
+            return self.send(codes.get(r, 502), {"ok": True} if r == "ok" else {"erreur": {
+                "inconnu": "création inconnue", "en cours": "création en cours : attends qu'elle finisse",
+                "pas configuré": "archivage sur pve2 pas configuré (STUDIO_ARCHIVE)"}.get(r, r)})
         m = re.fullmatch(r"/studio/api/jobs/([0-9a-f]{10})/garder", self.path.split("?")[0].rstrip("/"))
         if m:
             try:

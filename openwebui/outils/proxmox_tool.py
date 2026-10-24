@@ -4,7 +4,10 @@ description: Gère le cluster Proxmox de la maison (pve + pve2) : état, VM/cont
 version: 1.0
 """
 
-# Outil Open WebUI créé le 19/10/2026. Clé API spark@pve!spark (rôle PVEAdmin) dans les valves (chiffrées).
+# Outil Open WebUI créé le 19/10/2026. Clé API spark@pve!spark dans les valves.
+# Droits de la clé (voir README, « Sécuriser la clé Proxmox de l'IA ») : lecture seule sur tout le cluster,
+# actions seulement sur le pool « agent ». C'est Proxmox qui bloque le reste ; la liste PROTEGES ci-dessous
+# n'est qu'une seconde barrière. Les valves ne sont chiffrées que si ENABLE_VALVE_ENCRYPTION=true dans Open WebUI.
 # Règles : lecture libre ; démarrer/arrêter/créer/sauvegarder = fenêtre de confirmation ;
 # les conteneurs d'infrastructure (coffre, VPN, proxy) ne peuvent pas être arrêtés ni supprimés par l'agent.
 
@@ -61,6 +64,7 @@ class Tools:
         token_id: str = Field("", description="ex. spark@pve!spark")
         token_secret: str = Field("", description="Secret de la clé API")
         ca_pem: str = Field("", description="Certificat racine du cluster (pve-root-ca.pem)")
+        pool: str = Field("", description="Pool Proxmox où ranger les conteneurs créés (ex. agent). Vide = aucun pool.")
 
     def __init__(self):
         self.valves = self.Valves()
@@ -297,6 +301,9 @@ class Tools:
             "password": secrets.token_urlsafe(24),
             "description": f"Créé par l'agent Proxmox le {time.strftime('%d/%m/%Y')}",
         }
+        if self.valves.pool.strip():
+            # Sans ça, la clé limitée au pool ne pourrait plus gérer le conteneur qu'elle vient de créer
+            donnees["pool"] = self.valves.pool.strip()
         upid = await self._a("POST", "/nodes/pve/lxc", donnees)
         res = await self._attendre_tache("pve", upid, 600)
         await self._statut(__event_emitter__, f"🖥️ Conteneur {nom} : {res}", True)

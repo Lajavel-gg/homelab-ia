@@ -30,6 +30,7 @@ import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -242,7 +243,7 @@ CATEGORIES = ("Banque", "Santé", "Livraison", "Administration", "Personnel", "T
 
 def etat_homelab(conf):
     """{"services": [(nom, ok, détail)], "sauvegarde": (ok, détail court, heure), "jauges": [(nom, %, détail)],
-    "serveurs": [(nom, ok, détail)]} ; ok = True, False ou None (pas grave / inconnu)."""
+    "proxmox": voir etat_proxmox} ; ok = True, False ou None (pas grave / inconnu)."""
     services, jauges = [], []
     video = False
     try:
@@ -299,8 +300,7 @@ def etat_homelab(conf):
     except Exception:  # noqa: BLE001
         pass
 
-    serveurs, j2 = etat_proxmox(conf)
-    return {"services": services, "sauvegarde": sauvegarde, "jauges": jauges + j2, "serveurs": serveurs}
+    return {"services": services, "sauvegarde": sauvegarde, "jauges": jauges, "proxmox": etat_proxmox(conf)}
 
 
 def taille(octets):
@@ -309,29 +309,76 @@ def taille(octets):
 
 
 def etat_proxmox(conf):
+    """État du cluster Proxmox (une clé en lecture seule suffit). None si non configuré."""
     if not (conf.get("PVE_HOST") and conf.get("PVE_TOKEN_ID") and conf.get("PVE_TOKEN_SECRET")):
-        return [], []
+        return None
     ca = conf.get("PVE_CA", "")
     ctx = ssl.create_default_context(cafile=ca) if ca and os.path.exists(ca) else ssl._create_unverified_context()
     ctx.check_hostname = False  # certificat du cluster émis pour un nom, on parle à l'IP
+    entetes = {"Authorization": f"PVEAPIToken={conf['PVE_TOKEN_ID']}={conf['PVE_TOKEN_SECRET']}"}
+    api = lambda chemin: http_json(f"https://{conf['PVE_HOST']}:8006/api2/json{chemin}", timeout=15, ctx=ctx,
+                                   headers=entetes)["data"]
+    pve = {"erreur": None, "quorum": None, "noeuds": [], "machines": [], "stockages": [], "sauvegardes": [],
+           "sondes": sondes(conf)}
     try:
-        res = http_json(f"https://{conf['PVE_HOST']}:8006/api2/json/cluster/resources", timeout=15, ctx=ctx,
-                        headers={"Authorization": f"PVEAPIToken={conf['PVE_TOKEN_ID']}={conf['PVE_TOKEN_SECRET']}"})["data"]
+        res = api("/cluster/resources")
+    except Exception as e:  # noqa: BLE001
+        pve["erreur"] = f"injoignable ({str(e)[:60]})"
+        return pve
+    try:
+        pve["quorum"] = next((bool(x.get("quorate")) for x in api("/cluster/status") if x.get("type") == "cluster"), None)
     except Exception:  # noqa: BLE001
-        return [("Proxmox", False, "injoignable")], []
-    serveurs, jauges = [], []
+        pass
+    pc = lambda a, b: round((a or 0) * 100 / b) if b else 0
     for n in sorted((r for r in res if r["type"] == "node"), key=lambda r: r["node"]):
-        if n.get("status") == "online":
-            serveurs.append((f"Serveur {n['node']}", True, "en ligne"))
-            jauges.append((f"Mémoire {n['node']}", round(n.get("mem", 0) * 100 / max(n.get("maxmem", 1), 1)),
-                           f"{taille(n.get('maxmem', 0) - n.get('mem', 0))} libres"))
-        else:
-            serveurs.append((f"Serveur {n['node']}", False, "hors ligne"))
-    invites = [r for r in res if r["type"] in ("qemu", "lxc") and not r.get("template")]
-    arretes = [f"{r['vmid']} {r.get('name', '')}".strip() for r in invites if r.get("status") != "running"]
-    serveurs.append(("VM et conteneurs", None if arretes else True,
-                     f"{len(invites) - len(arretes)}/{len(invites)} allumés" + (f" · arrêtés : {', '.join(arretes[:6])}" if arretes else "")))
-    return serveurs, jauges
+        en_ligne = n.get("status") == "online"
+        pve["noeuds"].append({"nom": n["node"], "en_ligne": en_ligne, "cpu": round((n.get("cpu") or 0) * 100),
+                              "mem": pc(n.get("mem"), n.get("maxmem")), "disque": pc(n.get("disk"), n.get("maxdisk")),
+                              "jours": round((n.get("uptime") or 0) / 86400, 1), "mem_total": n.get("maxmem", 0)})
+        if not en_ligne:
+            continue
+        try:  # sauvegardes Proxmox (vzdump) des dernières 24 h sur ce nœud
+            depuis = int(time.time() - 86400)
+            for t in api(f"/nodes/{n['node']}/tasks?typefilter=vzdump&since={depuis}&limit=20") or []:
+                st = t.get("status")
+                pve["sauvegardes"].append({"noeud": n["node"], "debut": t.get("starttime", 0), "machine": t.get("id") or "",
+                                           "ok": None if st is None else st == "OK",
+                                           "detail": "en cours" if st is None else ("réussie" if st == "OK" else st[:80])})
+        except Exception:  # noqa: BLE001
+            pass
+    for r in sorted((r for r in res if r["type"] in ("qemu", "lxc") and not r.get("template")), key=lambda r: r["vmid"]):
+        pve["machines"].append({"vmid": r["vmid"], "nom": r.get("name", ""), "type": "VM" if r["type"] == "qemu" else "CT",
+                                "allumee": r.get("status") == "running", "noeud": r.get("node", ""),
+                                "mem": pc(r.get("mem"), r.get("maxmem")) if r.get("status") == "running" else None,
+                                "jours": round((r.get("uptime") or 0) / 86400, 1)})
+    vus = set()
+    for s in sorted((r for r in res if r["type"] == "storage" and r.get("maxdisk")), key=lambda r: r["storage"]):
+        cle = s["storage"] if s.get("shared") else f"{s['storage']} ({s['node']})"
+        if cle in vus:
+            continue
+        vus.add(cle)
+        pve["stockages"].append((cle, pc(s.get("disk"), s.get("maxdisk")),
+                                 f"{taille(s['maxdisk'] - (s.get('disk') or 0))} libres sur {taille(s['maxdisk'])}"))
+    return pve
+
+
+def sondes(conf):
+    """Services du réseau à tester (resume.env : SONDES=Nom=https://adresse,Autre=http://…). Liste de (nom, ok, détail)."""
+    out = []
+    for morceau in filter(None, (x.strip() for x in conf.get("SONDES", "").split(","))):
+        if "=" not in morceau:
+            continue
+        nom, url = (x.strip() for x in morceau.split("=", 1))
+        ctx = ssl._create_unverified_context()  # on teste seulement que le service répond
+        t0 = time.time()
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=8, context=ctx).close()
+            out.append((nom, True, f"répond en {round((time.time() - t0) * 1000)} ms"))
+        except urllib.error.HTTPError as e:  # une page d'erreur prouve quand même que le service tourne
+            out.append((nom, e.code < 500, f"répond (HTTP {e.code})" if e.code < 500 else f"erreur HTTP {e.code}"))
+        except Exception:  # noqa: BLE001
+            out.append((nom, False, "ne répond pas"))
+    return out
 
 
 # ------------------------------------------------------------------ historique (graphique des 7 jours)
@@ -408,6 +455,99 @@ def _jauge(nom, pc, detail):
             f'<tr><td colspan="2" style="padding:3px 0 4px;font-size:12px;color:{C["discret"]}">{e(detail)}{alerte}</td></tr>')
 
 
+def _table(contenu):
+    return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{contenu}</table>'
+
+
+def _sous_titre(texte):
+    return (f'<div style="font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;'
+            f'color:{C["discret"]};padding:18px 0 4px">{texte}</div>')
+
+
+def _liste_etats(lignes):
+    e = html.escape
+    return _table("".join(
+        f'<tr><td style="padding:6px 0;font-size:14px;color:{C["texte"]};border-bottom:1px solid {C["piste"]}">'
+        f'{_pastille(ok)}&nbsp;&nbsp;{e(nom)}</td><td align="right" style="padding:6px 0 6px 8px;font-size:13px;'
+        f'color:{C["critique"] if ok is False else C["discret"]};border-bottom:1px solid {C["piste"]}">{e(det)}</td></tr>'
+        for nom, ok, det in lignes))
+
+
+def _mini_jauge(nom, pc):
+    couleur = C["critique"] if pc >= 90 else C["attention"] if pc >= 75 else C["bleu"]
+    return (f'<td width="33%" valign="top" style="padding:0 6px">'
+            f'<div style="font-size:11px;color:{C["discret"]}">{nom}</div>'
+            f'<div style="font-size:15px;font-weight:600;color:{C["texte"]};padding:1px 0 4px">{pc} %</div>'
+            f'<div style="background:{C["piste"]};border-radius:3px;height:6px;overflow:hidden">'
+            f'<div style="background:{couleur};width:{max(min(pc, 100), 2)}%;height:6px;border-radius:3px"></div></div></td>')
+
+
+def problemes_proxmox(pve):
+    """Ce qui mérite une alerte côté Proxmox (une machine arrêtée n'en est pas une : ça peut être voulu)."""
+    if not pve:
+        return []
+    if pve["erreur"]:
+        return [f"Proxmox {pve['erreur']}"]
+    pb = [f"{n['nom']} hors ligne" for n in pve["noeuds"] if not n["en_ligne"]]
+    if pve["quorum"] is False:
+        pb.append("cluster sans quorum")
+    pb += [f"sauvegarde {s['noeud']} : {s['detail']}" for s in pve["sauvegardes"] if s["ok"] is False]
+    pb += [f"{nom} ne répond pas" for nom, ok, det in pve["sondes"] if ok is False]
+    pb += [f"stockage {nom} plein à {pc} %" for nom, pc, det in pve["stockages"] if pc >= 90]
+    pb += [f"{n['nom']} : mémoire à {n['mem']} %" for n in pve["noeuds"] if n["en_ligne"] and n["mem"] >= 90]
+    return pb
+
+
+def bloc_proxmox(pve, pb):
+    e = html.escape
+    if pve["erreur"]:
+        return _liste_etats([("API Proxmox", False, pve["erreur"])])
+    h = ""
+    if pb:
+        h += (f'<div style="background:#fdf1f1;border:1px solid #f3cccc;border-radius:8px;padding:10px 12px;'
+              f'margin:4px 0 6px;font-size:13px;color:{C["critique"]};line-height:1.5">'
+              + "<br>".join(e(p) for p in pb) + '</div>')
+    # serveurs : état + trois mini-jauges
+    for k, n in enumerate(pve["noeuds"]):
+        etat_txt = f"en ligne depuis {str(n['jours']).replace('.', ',')} j" if n["en_ligne"] else "HORS LIGNE"
+        h += _table(f'<tr><td style="padding:{14 if k else 6}px 0 8px;font-size:15px;font-weight:600;color:{C["texte"]}">'
+                    f'{_pastille(n["en_ligne"])}&nbsp;&nbsp;{e(n["nom"])}</td><td align="right" style="font-size:12px;'
+                    f'color:{C["discret" if n["en_ligne"] else "critique"]}">{etat_txt}</td></tr>')
+        if n["en_ligne"]:
+            h += _table('<tr>' + _mini_jauge("Processeur", n["cpu"]) + _mini_jauge("Mémoire", n["mem"])
+                        + _mini_jauge("Disque", n["disque"]) + '</tr>')
+    if pve["quorum"] is not None:
+        h += (f'<div style="font-size:12px;color:{C["discret" if pve["quorum"] else "critique"]};padding-top:10px">'
+              f'Cluster : {"quorum OK" if pve["quorum"] else "PAS DE QUORUM"}</div>')
+
+    # machines
+    if pve["machines"]:
+        h += _sous_titre(f"Machines · {sum(1 for m in pve['machines'] if m['allumee'])}/{len(pve['machines'])} allumées")
+        lignes = ""
+        for m in sorted(pve["machines"], key=lambda m: (m["allumee"], m["vmid"])):
+            badge = (f'<span style="font-size:10px;color:{C["texte2"]};background:{C["piste"]};border-radius:6px;'
+                     f'padding:1px 5px;margin-left:6px">{m["type"]}</span>')
+            droite = (f"mém. {m['mem']} % · {e(m['noeud'])}" if m["allumee"] else f"arrêtée · {e(m['noeud'])}")
+            lignes += (f'<tr><td style="padding:6px 0;font-size:14px;color:{C["texte"]};border-bottom:1px solid {C["piste"]}">'
+                       f'{_pastille(True if m["allumee"] else None)}&nbsp;&nbsp;<span style="color:{C["discret"]}">'
+                       f'{m["vmid"]}</span>&nbsp;{e(m["nom"])}{badge}</td><td align="right" style="padding:6px 0 6px 8px;'
+                       f'font-size:13px;color:{C["discret"]};border-bottom:1px solid {C["piste"]}">{droite}</td></tr>')
+        h += _table(lignes)
+
+    if pve["sondes"]:
+        h += _sous_titre("Services du réseau") + _liste_etats(sorted(pve["sondes"], key=lambda s: s[1] is not False))
+    if pve["stockages"]:
+        h += _sous_titre("Stockages") + _table("".join(_jauge(*s) for s in pve["stockages"]))
+    h += _sous_titre("Sauvegardes Proxmox de la nuit")
+    if pve["sauvegardes"]:
+        h += _liste_etats([(f"{s['noeud']} · {datetime.fromtimestamp(s['debut']):%H:%M}"
+                            + (f" · machine {s['machine']}" if s["machine"] else ""), s["ok"], s["detail"])
+                           for s in sorted(pve["sauvegardes"], key=lambda s: s["debut"])])
+    else:
+        h += f'<div style="font-size:13px;color:{C["discret"]};padding:4px 0">Aucune sauvegarde Proxmox ces dernières 24 h.</div>'
+    return h
+
+
 def _graphique_7_jours(hist, aujourdhui):
     """Barres empilées : mails importants (bleu) + autres non lus (bleu clair), sur les 7 derniers jours."""
     par_date = {x["date"]: x for x in hist}
@@ -456,10 +596,12 @@ def construire(mails, tri, etat, conf, hist=None):
     else:
         importants, intro = tri
     urgents = sum(1 for i in importants if i["urgent"])
-    services = etat["services"] + etat["serveurs"]
+    services = etat["services"]
     en_panne = [s for s in services if s[1] is False]
     sauv_ok, sauv_txt, sauv_heure = etat["sauvegarde"]
-    alertes = len(en_panne) + (sauv_ok is False) + sum(1 for j in etat["jauges"] if j[1] >= 90)
+    pve = etat.get("proxmox")
+    pb_pve = problemes_proxmox(pve)
+    alertes = (len(en_panne) + (sauv_ok is False) + sum(1 for j in etat["jauges"] if j[1] >= 90) + len(pb_pve))
 
     pl = lambda n, mot: f"{n} {mot}{'s' if n > 1 else ''}"
     sujet = f"Résumé du matin — {date_fr(maintenant)} · {pl(len(importants), 'mail')} à voir"
@@ -471,9 +613,17 @@ def construire(mails, tri, etat, conf, hist=None):
     for i in importants:
         t.append(f"- {'[URGENT] ' if i['urgent'] else ''}{i['titre'] or i['mail']['sujet']}"
                  + (f" : {i['resume']}" if i["resume"] else "") + f"  ({i['mail']['de']})")
-    t += ["", f"SAUVEGARDE : {sauv_txt} ({sauv_heure})", "SERVICES :"]
+    t += ["", "SPARK", f"- Sauvegarde : {sauv_txt} ({sauv_heure})"]
     t += [f"- {nom} : {det}" for nom, ok, det in services]
     t += [f"- {nom} : {pc} % ({det})" for nom, pc, det in etat["jauges"]]
+    if pve:
+        t += ["", "PROXMOX"] + [f"- ALERTE : {p}" for p in pb_pve]
+        t += [f"- {n['nom']} : {'en ligne' if n['en_ligne'] else 'HORS LIGNE'}, CPU {n['cpu']} %, mémoire {n['mem']} %, "
+              f"disque {n['disque']} %" for n in pve["noeuds"]]
+        t += [f"- {m['vmid']} {m['nom']} : {'allumée' if m['allumee'] else 'arrêtée'}" for m in pve["machines"]]
+        t += [f"- {nom} : {det}" for nom, ok, det in pve["sondes"]]
+        t += [f"- Stockage {nom} : {pc} % ({det})" for nom, pc, det in pve["stockages"]]
+        t += [f"- Sauvegarde {s['noeud']} {datetime.fromtimestamp(s['debut']):%H:%M} : {s['detail']}" for s in pve["sauvegardes"]]
 
     # ---------------- HTML
     entete = (f'<tr><td style="padding:8px 6px 18px"><div style="font-size:12px;font-weight:600;letter-spacing:.08em;'
@@ -482,20 +632,38 @@ def construire(mails, tri, etat, conf, hist=None):
               f'{e(date_fr(maintenant).capitalize())}</div>'
               f'<div style="font-size:15px;color:{C["texte2"]};margin-top:8px;line-height:1.5">{e(intro)}</div></td></tr>')
 
-    total_srv = len(services)
+    # tuile Sauvegardes : celle du Spark (restic) + celles de Proxmox (vzdump) de la nuit
+    vz = (pve or {}).get("sauvegardes") or []
+    vz_ok = None if not vz else (False if any(s["ok"] is False for s in vz) else (None if any(s["ok"] is None for s in vz) else True))
+    toutes_ok = sauv_ok is True and (pve is None or vz_ok is True)
+    echec = sauv_ok is False or vz_ok is False
+    detail_sauv = f"Spark {sauv_heure.split(' · ')[-1]}"
+    if pve is not None:
+        detail_sauv += f" · Proxmox {datetime.fromtimestamp(max(s['debut'] for s in vz)):%H:%M}" if vz else " · Proxmox : aucune"
+    # tuile Proxmox
+    if pve is None:
+        tuile_pve = _tuile("Proxmox", "—", "non configuré (resume.env)")
+    elif pve["erreur"]:
+        tuile_pve = _tuile("Proxmox", "Injoignable", "l'API ne répond pas", ok=False, montrer_pastille=True)
+    else:
+        allumees = sum(1 for m in pve["machines"] if m["allumee"])
+        hors = [n["nom"] for n in pve["noeuds"] if not n["en_ligne"]]
+        tuile_pve = _tuile("Proxmox", f"{allumees}/{len(pve['machines'])}",
+                           ("machines allumées · " + (f"{', '.join(hors)} hors ligne" if hors
+                                                      else f"{len(pve['noeuds'])} serveurs en ligne")),
+                           ok=False if pb_pve else (None if allumees < len(pve["machines"]) else True), montrer_pastille=True)
     ok_srv = sum(1 for s in services if s[1] is not False)
-    disque = next((j for j in etat["jauges"] if j[0].startswith("Disque")), None)
     tuiles = (
         '<tr><td style="padding:0 0 8px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
         + _tuile("Mails à voir", str(len(importants)),
                  f"dont {urgents} urgent{'s' if urgents > 1 else ''}" if urgents else f"sur {len(mails)} non lus",
                  ok=False if urgents else None, montrer_pastille=bool(urgents))
-        + _tuile("Services", f"{ok_srv}/{total_srv}", "tout fonctionne" if not en_panne else f"{len(en_panne)} en panne",
-                 ok=not en_panne, montrer_pastille=True)
+        + _tuile("Sauvegardes", "Échec" if echec else ("Réussies" if toutes_ok else "À vérifier"), e(detail_sauv),
+                 ok=False if echec else (True if toutes_ok else None), montrer_pastille=True)
         + '</tr><tr>'
-        + _tuile("Sauvegarde", e(sauv_txt.capitalize()), e(sauv_heure), ok=sauv_ok, montrer_pastille=True)
-        + (_tuile("Disque", f"{disque[1]} %", e(disque[2]), ok=disque[1] < 90 if disque[1] >= 75 else True,
-                  montrer_pastille=True) if disque else _tuile("Disque", "—", "inconnu"))
+        + _tuile("Spark", f"{ok_srv}/{len(services)}", "services en marche" if not en_panne else f"{len(en_panne)} en panne",
+                 ok=not en_panne, montrer_pastille=True)
+        + tuile_pve
         + '</tr></table></td></tr>')
 
     if importants:
@@ -522,20 +690,17 @@ def construire(mails, tri, etat, conf, hist=None):
     else:
         bloc_mails = f'<div style="font-size:14px;color:{C["texte2"]}">Rien d\'important cette nuit.</div>'
 
-    srv = "".join(
-        f'<tr><td style="padding:6px 0;font-size:14px;color:{C["texte"]};border-bottom:1px solid {C["piste"]}">'
-        f'{_pastille(ok)}&nbsp;&nbsp;{e(nom)}</td><td align="right" style="padding:6px 0;font-size:13px;'
-        f'color:{C["critique"] if ok is False else C["discret"]};border-bottom:1px solid {C["piste"]}">{e(det)}</td></tr>'
-        for nom, ok, det in sorted(services, key=lambda s: {False: 0, None: 1, True: 2}[s[1]]))
-    jauges = "".join(_jauge(*j) for j in etat["jauges"])
-    bloc_homelab = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{srv}</table>'
-                    + (f'<div style="height:14px"></div><table role="presentation" width="100%" cellpadding="0" '
-                       f'cellspacing="0">{jauges}</table>' if jauges else ""))
+    tri_etat = lambda lst: sorted(lst, key=lambda s: {False: 0, None: 1, True: 2}[s[1]])
+    bloc_spark = (_liste_etats(tri_etat(services + [("Sauvegarde de la nuit", sauv_ok, f"{sauv_txt} · {sauv_heure}")]))
+                  + _sous_titre("Ressources") + _table("".join(_jauge(*j) for j in etat["jauges"])))
 
     cartes = _carte("À voir aujourd'hui", bloc_mails, f"{len(importants)} sur {len(mails)} non lus")
     if hist:
         cartes += _carte("Mails des 7 derniers jours", _graphique_7_jours(hist, maintenant))
-    cartes += _carte("Homelab", bloc_homelab)
+    cartes += _carte("Spark", bloc_spark, "IA, images, vidéos")
+    if pve is not None:
+        cartes += _carte("Proxmox", bloc_proxmox(pve, pb_pve), "pve · pve2" if not pve["noeuds"] else
+                         " · ".join(n["nom"] for n in pve["noeuds"]))
 
     page = (f'<div style="background:{C["page"]};padding:20px 10px;font-family:{POLICE}">'
             f'<table role="presentation" align="center" width="100%" cellpadding="0" cellspacing="0" '

@@ -199,7 +199,7 @@ sudo systemctl start resume-matin && journalctl -u resume-matin -n 20
 sudo systemctl enable --now resume-matin.timer
 ```
 
-Pour voir l'état de Proxmox dans le résumé, remplir les lignes `PVE_*` de `resume.env` (une clé en lecture seule suffit) et copier le certificat `pve-root-ca.pem` dans `/opt/ai-stack/resume/`.
+Pour la partie Proxmox (serveurs, machines, stockages, sauvegardes vzdump de la nuit), remplir les lignes `PVE_*` de `resume.env` (une clé en lecture seule suffit : `PVEAuditor` sur `/`) et copier le certificat `pve-root-ca.pem` dans `/opt/ai-stack/resume/`. La ligne `SONDES` liste les services du réseau à tester chaque matin (Vaultwarden, VPN, LanguageTool…).
 
 Gmail ne fait pas toujours sonner le téléphone pour un message déposé de cette façon : il apparaît en haut de la réception, en gras, mais sans notification. Si tu veux une notification, on ajoutera ntfy plus tard.
 

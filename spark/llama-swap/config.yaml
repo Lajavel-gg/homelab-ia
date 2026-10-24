@@ -19,6 +19,11 @@ models:
     name: "Qwen3.8 Flash-Next"
     aliases: ["verif"]       # le vérificateur d'images du Studio demande le modèle « verif »
     ttl: 1800                # libère la mémoire après 30 min sans message (avant : --sleep-idle-seconds 1800)
+    filters:
+      setParamsByID:
+        # « manga » : même modèle (rien à recharger), sans phase de réflexion, pour traduire les bulles vite
+        "manga":
+          chat_template_kwargs: {"enable_thinking": false, "max_tool_response_chars": 30000}
     cmd: |
       ${garde} 80 ${llama} --host 127.0.0.1 --port ${PORT}
       -m /opt/models/qwen38-flash-next/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf

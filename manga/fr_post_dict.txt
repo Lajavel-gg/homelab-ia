@@ -1,0 +1,4 @@
+# Remplacements appliqués à chaque traduction avant de l'écrire dans la bulle (format : motif<TAB>remplacement).
+# Les polices de style BD fournies n'ont pas le caractère « œ » : sans ça, un carré vide apparaîtrait.
+œ	oe
+Œ	OE

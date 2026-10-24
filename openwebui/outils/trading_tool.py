@@ -8,6 +8,7 @@ version: 1.0
 
 import asyncio
 import json
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -189,11 +190,10 @@ class Tools:
             demande["pause"] = pause
         if not demande:
             return "Aucun réglage demandé."
-        if __event_call__:
-            ok = await __event_call__({"type": "confirmation", "data": {
-                "title": "Changer les réglages du bot ?", "message": json.dumps(demande, ensure_ascii=False)}})
-            if ok is not True:
-                return "Annulé : l'utilisateur n'a pas confirmé."
+        # Sans fenêtre de confirmation possible (appel par l'API, autre client), on refuse au lieu de passer outre
+        if not __event_call__ or await __event_call__({"type": "confirmation", "data": {
+                "title": "Changer les réglages du bot ?", "message": json.dumps(demande, ensure_ascii=False)}}) is not True:
+            return "Annulé : l'utilisateur n'a pas confirmé."
         r = await asyncio.to_thread(_post, "/reglages", demande)
         return json.dumps(r, ensure_ascii=False)
 
@@ -202,10 +202,8 @@ class Tools:
         Lance tout de suite une nouvelle analyse de l'IA sur tous les marchés actifs, puis applique ses décisions
         (environ 15 min par marché ; le chat est plus lent pendant ce temps). Demande confirmation.
         """
-        if __event_call__:
-            ok = await __event_call__({"type": "confirmation", "data": {
+        if not __event_call__ or await __event_call__({"type": "confirmation", "data": {
                 "title": "Lancer une analyse maintenant ?",
-                "message": "L'IA va analyser chaque marché (≈ 15 min chacun) et appliquer ses décisions au portefeuille fictif."}})
-            if ok is not True:
-                return "Annulé : l'utilisateur n'a pas confirmé."
+                "message": "L'IA va analyser chaque marché (≈ 15 min chacun) et appliquer ses décisions au portefeuille fictif."}}) is not True:
+            return "Annulé : l'utilisateur n'a pas confirmé."
         return json.dumps(await asyncio.to_thread(_post, "/lancer", {}), ensure_ascii=False)

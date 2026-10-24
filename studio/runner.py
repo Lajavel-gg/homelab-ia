@@ -371,11 +371,15 @@ PAGE = """<!doctype html><html lang=fr><head><meta charset=utf-8>
 video,model-viewer{width:100%;max-height:70vh;height:60vh;background:#000;border-radius:8px}
 small{color:#999}a{color:#8cf}</style></head><body><h1>🎬 Studio</h1><div id=l></div>
 <script>
+// Tout est échappé : prompt, étape et messages d'erreur peuvent contenir du texte venu du web.
+// La page est sur la même adresse qu'Open WebUI, une injection HTML pourrait y voler la session.
+const e=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const media=f=>/^\\/studio\\/media\\/[0-9a-f]{32}\\.[a-z0-9]{2,4}$/.test(f||'')?f:'';
 async function go(){const j=await (await fetch('api/jobs')).json();
 document.getElementById('l').innerHTML=Object.entries(j).reverse().map(([id,x])=>{
-let m='';if(x.statut=='terminé'){m=x.format=='image'?`<img src="${x.fichier}" style="max-width:100%;border-radius:8px">`:x.format=='glb'?`<model-viewer src="${x.fichier}" camera-controls auto-rotate shadow-intensity=1></model-viewer>`:`<video src="${x.fichier}" controls loop playsinline></video>`;
-m+=`<br><a href="${x.fichier}" download>⬇️ Télécharger</a>`}
-return `<div class=c><b>${x.type}</b> — ${x.statut}<br>${(x.prompt||'').replace(/</g,'&lt;')}<br><small>${x.etape||''} · ${new Date(x.cree*1000).toLocaleString()}</small><br>${m}</div>`}).join('')}
+let m='';const f=media(x.fichier);if(x.statut=='terminé'&&f){m=x.format=='image'?`<img src="${f}" style="max-width:100%;border-radius:8px">`:x.format=='glb'?`<model-viewer src="${f}" camera-controls auto-rotate shadow-intensity=1></model-viewer>`:`<video src="${f}" controls loop playsinline></video>`;
+m+=`<br><a href="${f}" download>⬇️ Télécharger</a>`}
+return `<div class=c><b>${e(x.type)}</b> — ${e(x.statut)}<br>${e(x.prompt)}<br><small>${e(x.etape)} · ${new Date(x.cree*1000).toLocaleString()}</small><br>${m}</div>`}).join('')}
 go();setInterval(go,10000)
 </script></body></html>"""
 
@@ -413,6 +417,8 @@ class H(BaseHTTPRequestHandler):
         if self.path.rstrip("/") != "/studio/api/jobs":
             return self.send(404, {"erreur": "inconnu"})
         n = int(self.headers.get("content-length", 0))
+        if n > 60 * 2**20:  # une image en base64 fait quelques Mo ; au-delà, on refuse au lieu de remplir la mémoire
+            return self.send(413, {"erreur": "requête trop grosse"})
         try:
             req = json.loads(self.rfile.read(n))
         except ValueError:

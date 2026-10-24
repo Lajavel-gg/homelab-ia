@@ -126,6 +126,17 @@ def _appel(png, texte, max_tokens=900):
     return json.loads(re.search(r"\{.*\}", txt, re.S).group(0))
 
 
+# Mots qui rendent une scène suggestive, en français (y compris écrit au son) et en anglais (le prompt est en anglais).
+SUGGESTIF = re.compile(
+    r"sex|sensu|erot|érot|seduc|séduc|lingerie|bikini|swimsuit|maillot|sous[- ]?v[eê]t|underwear|panties|bra\b|"
+    r"nude|naked|\bnue?s?\b|topless|cleavage|d[ée]collet|seins?\b|breast|soumi|esclave|slave|bondage|fetish|f[ée]tich|"
+    r"provocant|provocative|lascive|aguicheu|pin[- ]?up")
+
+
+def _suggestif(*textes):
+    return bool(SUGGESTIF.search(" ".join(t or "" for t in textes).lower()))
+
+
 def _verifier(png, demande, prompt):
     """Vérificateur v2 : description à l'aveugle puis comparaison élément par élément (banc d'essai : 11/12 contre 7/12)."""
     try:
@@ -136,12 +147,11 @@ def _verifier(png, demande, prompt):
             age = float(obs.get("apparent_age") or 99)
         except (TypeError, ValueError):
             age = 99
-        if (obs.get("youthful_face") or age <= 24) and v.get("ok"):
-            suggestif = re.search(r"sexy|sexi|soumi|esclave|lingerie|bikini|décolleté|decollet|seins|sein", (demande or "").lower())
-            if suggestif:
-                v["ok"] = False
-                v.setdefault("problemes", []).append("Le visage paraît trop jeune pour une scène sexy.")
-                v.setdefault("corrections", []).append("clearly adult woman in her thirties with a mature adult face")
+        if (obs.get("youthful_face") or age <= 24) and _suggestif(demande, prompt):
+            v["ok"] = False
+            v["trop_jeune"] = True  # cette image ne sera jamais affichée (voir creer_image)
+            v.setdefault("problemes", []).append("Le visage paraît trop jeune pour une scène sexy.")
+            v.setdefault("corrections", []).append("clearly adult woman in her thirties with a mature adult face")
         v["corrections"] = [str(x) for x in (v.get("corrections") or [])][:8]
         v["problemes"] = [str(x) for x in (v.get("problemes") or [])][:8]
         return v
@@ -534,6 +544,16 @@ class Tools:
             corr = "; ".join(verdict["corrections"])
             texte = f"{corr}. {texte}"  # les éléments manquants en premier, en phrases simples
 
+        # Garde-fou : une personne qui paraît mineure dans une scène suggestive n'est JAMAIS affichée,
+        # même si c'est le « meilleur » essai. Idem si la vérification n'a pas pu se faire sur une demande suggestive.
+        essais = [e for e in essais if not e[1].get("trop_jeune")]
+        if _suggestif(demande, texte, personnages):
+            essais = [e for e in essais if e[1].get("erreur") is None]
+        if not essais:
+            await status("🎨 Image refusée", True)
+            return ("REFUSÉ, aucune image affichée : la personne paraissait mineure dans une scène suggestive, ou la "
+                    "vérification de l'âge n'a pas pu se faire. Dis-le simplement à l'utilisateur. Ne relance pas creer_image "
+                    "pour cette demande.")
         # garde le meilleur essai (le moins de problèmes)
         png, verdict, texte_final, nom_modele = min(essais, key=lambda e: (not e[1].get("ok"), len(e[1].get("problemes") or [])))
         fichier = await _publier_image(png, __request__, __user__, __chat_id__, __message_id__, __event_emitter__)

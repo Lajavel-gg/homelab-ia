@@ -1,6 +1,6 @@
 use_default_settings: true
 server:
-  secret_key: "${SEARXNG_SECRET}"
+  secret_key: "remplacée par la variable SEARXNG_SECRET (docker-compose)"
   limiter: false
   image_proxy: true
 search:

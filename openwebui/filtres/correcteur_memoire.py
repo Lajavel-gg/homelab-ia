@@ -3,6 +3,7 @@ title: Correcteur - mémoire personnelle
 description: Injecte le carnet de fautes de l'utilisateur dans le Correcteur, gère « retiens / oublie / carnet », s'appuie sur LanguageTool (pistes avant, relecture des fautes sûres après), met en forme les traductions et journalise les corrections pour l'apprentissage nocturne.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -148,7 +149,16 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
 
-    def inlet(self, body: dict, __user__: dict = None) -> dict:
+    # Open WebUI appelle un filtre « def » directement dans sa boucle principale : pendant les appels réseau
+    # (dictionnaire des sons, LanguageTool, jusqu'à 10 s), tout le serveur était bloqué, pour tous les chats.
+    # En « async » + thread, il reste disponible.
+    async def inlet(self, body: dict, __user__: dict = None) -> dict:
+        return await asyncio.to_thread(self._inlet, body, __user__)
+
+    async def outlet(self, body: dict, __user__: dict = None) -> dict:
+        return await asyncio.to_thread(self._outlet, body, __user__)
+
+    def _inlet(self, body: dict, __user__: dict = None) -> dict:
         messages = body.get("messages") or []
         if not messages or messages[-1].get("role") != "user":
             return body
@@ -213,7 +223,7 @@ class Filter:
         ]
         return body
 
-    def outlet(self, body: dict, __user__: dict = None) -> dict:
+    def _outlet(self, body: dict, __user__: dict = None) -> dict:
         messages = body.get("messages") or []
         if len(messages) < 2 or messages[-1].get("role") != "assistant":
             return body

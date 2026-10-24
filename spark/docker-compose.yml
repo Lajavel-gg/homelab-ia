@@ -10,6 +10,9 @@ services:
       HOST: 127.0.0.1
       PORT: "8080"
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      # Chiffre les valves (clé Proxmox…) dans la base, avec une clé tirée de WEBUI_SECRET_KEY.
+      # Les valves existantes sont migrées au démarrage. Ne plus changer WEBUI_SECRET_KEY ensuite.
+      ENABLE_VALVE_ENCRYPTION: "true"
       OLLAMA_BASE_URL: http://127.0.0.1:11434
       DEFAULT_MODELS: qwen3.8:27b-mtp-q4_K_M
       TASK_MODEL: qwen3.8:27b-mtp-q4_K_M
@@ -49,7 +52,7 @@ services:
       CODE_EXECUTION_JUPYTER_URL: http://127.0.0.1:8888
       CODE_EXECUTION_JUPYTER_AUTH: token
       CODE_EXECUTION_JUPYTER_AUTH_TOKEN: ${JUPYTER_TOKEN}
-      # Génération d'images (ComfyUI + FLUX.1-schnell)
+      # Génération d'images (ComfyUI + Qwen-Image 2.1 Turbo)
       ENABLE_IMAGE_GENERATION: "true"
       IMAGE_GENERATION_ENGINE: comfyui
       COMFYUI_BASE_URL: http://127.0.0.1:8188
@@ -72,6 +75,9 @@ services:
     image: searxng/searxng:latest
     restart: unless-stopped
     ports: ["127.0.0.1:8081:8080"]
+    # SearXNG ne remplace pas ${...} dans settings.yml : la clé doit arriver par cette variable
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
     volumes: [./searxng:/etc/searxng]
 
   speaches:

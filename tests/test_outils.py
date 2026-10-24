@@ -88,3 +88,11 @@ def test_serveurs_mcp_figes():
             continue  # programme installé dans l'image (version figée dans le Dockerfile)
         for p in paquets:
             assert "==" in p or "@" in p.lstrip("@"), f"{nom} : version non figée ({p})"
+
+
+def test_lecteur_du_chat_gere_les_creations_archivees():
+    import studio_tool
+    for fmt in ("image", "video", "glb"):
+        page = studio_tool._embed({"format": fmt, "fichier": "/studio/media/" + "a" * 32 + ".mp4"})
+        assert "addEventListener('error',absent)" in page and "archivée sur pve2" in page
+        assert 'id="dl"' in page and "Toutes mes créations" in page

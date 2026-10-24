@@ -257,8 +257,8 @@ def _embed(job, base=""):
         "new ResizeObserver(h).observe(document.body);setTimeout(h,300);setTimeout(h,1500);"
         # Fichier introuvable (archivé sur pve2 par le ménage du Studio, ou supprimé) : un message au lieu d'un lecteur noir
         "function absent(){document.getElementById('m').innerHTML='<div style=\"padding:18px 16px;border:1px solid #8884;"
-        "border-radius:10px;font-size:14px;line-height:1.5\">Cette création n\\u2019est plus sur le Spark : elle a été "
-        "archivée sur pve2, ou supprimée.<br><a href=\"/studio/\" target=\"_blank\" style=\"color:#8cf\">Voir toutes "
+        "border-radius:10px;font-size:14px;line-height:1.5;color:#8a8a93\">Cette création n\\u2019est plus sur le Spark : elle a été "
+        "archivée sur pve2, ou supprimée.<br><a href=\"/studio/\" target=\"_blank\" style=\"color:#4a90d9\">Voir toutes "
         "mes créations</a></div>';var d=document.getElementById('dl');if(d)d.remove();h()}"
         "document.querySelectorAll('#m img,#m video,#m model-viewer').forEach(x=>x.addEventListener('error',absent))</script>"
     )

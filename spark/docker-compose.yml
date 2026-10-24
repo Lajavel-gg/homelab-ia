@@ -123,6 +123,26 @@ services:
         reservations:
           devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
 
+  # Traduction de manga (agent « 📖 Manga ») — désactivé par défaut : docker compose --profile manga up -d manga
+  manga:
+    profiles: [manga]
+    build: ./manga             # sur le Spark : /opt/ai-stack/manga (dossier manga/ du dépôt)
+    image: local/manga-translator:latest
+    network_mode: host          # écoute sur 127.0.0.1:5003, parle au chat sur 127.0.0.1:8090
+    restart: unless-stopped
+    environment:
+      CUSTOM_OPENAI_API_BASE: http://127.0.0.1:8090/v1
+      CUSTOM_OPENAI_MODEL: manga   # alias de Flash-Next sans phase de réflexion (llama-swap)
+      CUSTOM_OPENAI_API_KEY: none
+    volumes:
+      - manga-models:/app/models
+      # consignes et carnets des séries, écrits par le Studio, lus au même chemin
+      - /opt/ai-stack/manga/series:/opt/ai-stack/manga/series:ro
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+
   caddy:
     image: caddy:2
     network_mode: host
@@ -131,6 +151,7 @@ services:
 
 volumes:
   caddy-data:
+  manga-models:
   open-webui:
   qdrant:
   hf-cache:

@@ -1,0 +1,20 @@
+[Unit]
+Description=llama-swap : chat Flash-Next, modèle des tâches et embeddings sur 127.0.0.1:8090, chargés à la demande
+After=network-online.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+# remplace l'ancien service : jamais les deux en même temps (même port)
+Conflicts=llama-flashnext.service
+
+[Service]
+# au démarrage, attendre que le GPU soit prêt (sinon les modèles tourneraient sur le processeur)
+ExecStartPre=/usr/local/bin/attendre-gpu
+ExecStart=/usr/local/bin/llama-swap -config /etc/llama-swap/config.yaml -listen 127.0.0.1:8090
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=400
+DynamicUser=yes
+# en cas de manque de mémoire, c'est le chat qui doit partir en premier (comme avant)
+OOMScoreAdjust=900
+
+[Install]
+WantedBy=multi-user.target

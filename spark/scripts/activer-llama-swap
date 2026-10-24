@@ -1,0 +1,78 @@
+#!/bin/bash
+# Passe le chat du Spark sur llama-swap (voir README, « llama-swap »). À lancer depuis le dépôt :
+#   sudo spark/scripts/activer-llama-swap                 # Ollama est arrêté (il ne sert plus)
+#   sudo spark/scripts/activer-llama-swap --garder-ollama
+# Retour en arrière à tout moment : sudo spark/scripts/revenir-sans-llama-swap
+set -euo pipefail
+VERSION=266
+SHA256_ARM64=09d1e007e7ce22736449eb77d4a78f71f34bad5be6a3a1e83c950fd4d7ecb7f3  # llama-swap_266_checksums.txt
+DEPOT=$(cd "$(dirname "$0")/../.." && pwd)
+GARDER_OLLAMA=${1:-}
+
+[ "$(id -u)" = 0 ] || { echo "À lancer avec sudo."; exit 1; }
+[ "$(uname -m)" = aarch64 ] || { echo "Prévu pour le DGX Spark (aarch64)."; exit 1; }
+etape() { printf '\n== %s\n' "$*"; }
+
+etape "1/6 Petits modèles (tâches + embeddings)"
+telecharger() {  # fichier url
+  if [ -s "$1" ]; then echo "déjà là : $1"; return; fi
+  mkdir -p "$(dirname "$1")"
+  curl -fL --retry 5 -C - -o "$1.part" "$2" && mv "$1.part" "$1"
+}
+telecharger /opt/models/taches/Qwen3.5-2B-Q8_0.gguf \
+  https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf
+telecharger /opt/models/embeddings/bge-m3-Q8_0.gguf \
+  https://huggingface.co/smarttasks/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf
+chmod -R a+rX /opt/models/taches /opt/models/embeddings
+
+etape "2/6 llama-swap v$VERSION (empreinte vérifiée)"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL -o "$tmp/ls.tgz" \
+  "https://github.com/mostlygeek/llama-swap/releases/download/v$VERSION/llama-swap_${VERSION}_linux_arm64.tar.gz"
+echo "$SHA256_ARM64  $tmp/ls.tgz" | sha256sum -c -
+tar -xzf "$tmp/ls.tgz" -C "$tmp" llama-swap
+install -m 755 "$tmp/llama-swap" /usr/local/bin/llama-swap
+
+etape "3/6 Configuration"
+install -D -m 644 "$DEPOT/spark/llama-swap/config.yaml" /etc/llama-swap/config.yaml
+install -m 755 "$DEPOT/spark/scripts/garde-memoire" "$DEPOT/spark/scripts/wait-mem" /usr/local/bin/
+install -m 644 "$DEPOT/spark/systemd/llama-swap.service" "$DEPOT/spark/systemd/gpu-limite.service" /etc/systemd/system/
+/usr/local/bin/llama-swap -config /etc/llama-swap/config.yaml -validate
+
+etape "4/6 Bascule : llama-flashnext → llama-swap"
+systemctl daemon-reload
+systemctl disable --now llama-flashnext
+systemctl enable --now llama-swap
+mkdir -p /etc/systemd/system/studio-runner.service.d
+printf '[Service]\nEnvironment=STUDIO_LLAMA=swap\n' > /etc/systemd/system/studio-runner.service.d/llama-swap.conf
+systemctl daemon-reload
+systemctl restart studio-runner
+
+etape "5/6 Premier chargement de Flash-Next (quelques minutes)"
+for _ in $(seq 120); do
+  if curl -sf -o /dev/null --max-time 10 http://127.0.0.1:8090/upstream/qwen3.8-flash-next/health; then
+    echo "Flash-Next répond."
+    break
+  fi
+  sleep 5
+done
+curl -sf http://127.0.0.1:8090/running || true
+echo
+
+etape "6/6 Ollama"
+if [ "$GARDER_OLLAMA" = "--garder-ollama" ]; then
+  echo "Ollama laissé en marche."
+else
+  systemctl disable --now ollama && echo "Ollama arrêté (rien n'est désinstallé : revenir-sans-llama-swap le relance)."
+fi
+
+cat <<'FIN'
+
+Terminé côté Spark. Reste à faire dans Open WebUI (Réglages admin) — voir le README :
+  - Documents : moteur d'embeddings « OpenAI », URL http://127.0.0.1:8090/v1, clé « none », modèle « bge-m3 »,
+    puis réindexer les documents ;
+  - Interface : modèle des tâches (externe) = « tache » ;
+  - Connexions : désactiver l'API Ollama si tu as arrêté Ollama.
+Journal : journalctl -u llama-swap -f      Interface de llama-swap : http://127.0.0.1:8090/ui (sur le Spark)
+FIN

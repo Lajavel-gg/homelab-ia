@@ -157,7 +157,7 @@ Puis dans Open WebUI, valves de l'outil Proxmox : `pool` = `agent` (les nouveaux
 
 À tester ensuite depuis le chat : « état du cluster », « arrête 110 » (doit être refusé), créer puis supprimer un conteneur de test. Si la création échoue sur les options `nesting`/`keyctl`, noter le message d'erreur exact.
 
-Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 8).
+Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 9).
 
 ### 4. Mémoire du Spark pleine « au bout d'un moment »
 
@@ -240,10 +240,37 @@ sudo systemctl restart studio-runner
 
 Les archives se consultent sur pve2 dans `/mnt/tank/studio/` (ou en partage réseau si tu en ajoutes un). Durée avant archivage : `Environment=STUDIO_GARDER_JOURS=90` (`0` = jamais).
 
-### 8. À faire ensuite (moins urgent)
+### 8. llama-swap (désactivé par défaut)
+
+Aujourd'hui, pour une vidéo, le Studio **arrête** le service du chat puis le relance : Open WebUI croit alors que le modèle n'existe plus (« Model not found »), et Ollama fait tourner en parallèle le gros modèle des tâches (`qwen3.8:27b`, ~20 Go). Avec [llama-swap](https://github.com/mostlygeek/llama-swap), un seul programme reste toujours en ligne sur `127.0.0.1:8090` (même port qu'avant) et charge / décharge les modèles à la demande :
+
+- **Flash-Next** (alias `verif` pour le Studio), libéré après 30 min sans message comme avant ;
+- **tache** : un petit modèle (Qwen3.5 2B, ~2 Go) pour les titres, tags et suggestions, à la place du 27 B d'Ollama ;
+- **bge-m3** : les embeddings des documents, à la place d'Ollama.
+
+Pendant une vidéo ou une 3D, le Studio vide llama-swap par son API et pose `/run/studio-pause` : tant que ce fichier existe, `garde-memoire` refuse de recharger un modèle (pas de conflit de mémoire avec ComfyUI). À la fin, le Studio enlève la pause et recharge Flash-Next tout de suite.
+
+**Activer** (depuis le dépôt, sur le Spark) — télécharge llama-swap (empreinte vérifiée) et les deux petits modèles, installe la config, bascule les services et arrête Ollama :
+
+```bash
+sudo spark/scripts/activer-llama-swap            # ou --garder-ollama pour laisser Ollama tourner
+journalctl -u llama-swap -f                      # journal ; interface : http://127.0.0.1:8090/ui sur le Spark
+```
+
+Puis dans **Open WebUI** (*Réglages admin*) — les variables du compose ne s'appliquent qu'au premier démarrage, ces réglages sont dans la base :
+
+1. *Documents* : moteur d'embeddings **OpenAI**, URL `http://127.0.0.1:8090/v1`, clé `none`, modèle `bge-m3`, puis **réindexer** les documents (les anciens vecteurs viennent d'Ollama).
+2. *Interface* : modèle des tâches (pour les modèles externes) = `tache`.
+3. *Connexions* : désactiver l'API Ollama.
+
+**À vérifier** : un message normal, une image (le chat reste dispo), une vidéo (pendant la vidéo un message répond « Chat en pause », puis le chat revient seul à la fin), un document dans une conversation, et le titre automatique des conversations.
+
+**Revenir en arrière** à tout moment : `sudo spark/scripts/revenir-sans-llama-swap`, puis remettre dans Open WebUI les réglages d'avant (embeddings Ollama, modèle des tâches, API Ollama).
+
+### 9. À faire ensuite (moins urgent)
 
 - **Figer les versions** : `open-webui:main` est une version de développement, pas une version stable. Utiliser par exemple `ghcr.io/open-webui/open-webui:v0.12.3`, et des versions précises au lieu de `:latest` (Qdrant, SearXNG, Jupyter, Vaultwarden…) (les serveurs MCP de `mail/config.json` sont déjà figés dans cette branche).
-- **Remplacer du code maison par des outils existants** : llama-swap (charge/décharge les modèles à la demande, le chat ne « disparaît » plus pendant les vidéos) et suppression d'Ollama (llama-swap sert aussi bge-m3 et un petit modèle de tâches) ; Proxmox Backup Server pour les sauvegardes des machines ; Diun ou Renovate pour être prévenu des nouvelles versions ; options mémoire de ComfyUI (`--disable-smart-memory`) au lieu du timer qui le vide toutes les 5 min.
+- **Remplacer du code maison par des outils existants** : Proxmox Backup Server pour les sauvegardes des machines ; Diun ou Renovate pour être prévenu des nouvelles versions ; options mémoire de ComfyUI (`--disable-smart-memory`) au lieu du timer qui le vide toutes les 5 min.
 - **Vaultwarden** : passer en 1.37.4 ou plus (7 failles corrigées), activer la double authentification, et n'accepter le port 8080 que depuis HAProxy (pare-feu Proxmox sur le conteneur 110, source 192.168.0.212).
 - **wg-easy** : activer la double authentification de l'interface ; charger `wireguard` sur l'hôte Proxmox puis retirer `SYS_MODULE` et le montage `/lib/modules`.
 - **Modèle des tâches** (titres, tags, requêtes de recherche) : un petit modèle (2-3 B) au lieu du 27 B, comme le conseille la doc d'Open WebUI.

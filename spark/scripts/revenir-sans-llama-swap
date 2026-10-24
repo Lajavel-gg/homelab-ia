@@ -1,0 +1,12 @@
+#!/bin/bash
+# Retour à l'ancien fonctionnement : llama-flashnext (systemd) + Ollama. Les fichiers de llama-swap restent en place.
+set -euo pipefail
+[ "$(id -u)" = 0 ] || { echo "À lancer avec sudo."; exit 1; }
+systemctl disable --now llama-swap || true
+rm -f /etc/systemd/system/studio-runner.service.d/llama-swap.conf /run/studio-pause
+systemctl daemon-reload
+systemctl enable --now llama-flashnext ollama
+systemctl restart studio-runner
+echo "Revenu à llama-flashnext + Ollama."
+echo "Dans Open WebUI, remettre les réglages d'avant : embeddings « Ollama » / bge-m3, modèle des tâches qwen3.8:27b"
+echo "(ou un petit modèle Ollama), et réactiver l'API Ollama."

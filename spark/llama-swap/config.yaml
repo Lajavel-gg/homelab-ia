@@ -1,0 +1,61 @@
+# llama-swap — un seul point d'entrée sur 127.0.0.1:8090 (le même port qu'avant : Open WebUI, le Studio, le résumé
+# du matin et le Correcteur n'ont rien à changer). Il démarre chaque modèle à la première requête et l'arrête
+# après « ttl » secondes sans utilisation ; lui reste toujours en ligne, donc le chat ne « disparaît » plus.
+# Activation : sudo spark/scripts/activer-llama-swap — retour en arrière : sudo spark/scripts/revenir-sans-llama-swap
+# Vérifier ce fichier : llama-swap -config /etc/llama-swap/config.yaml -validate
+
+healthCheckTimeout: 600     # Flash-Next peut mettre quelques minutes à charger ses ~80 Go
+logLevel: info
+startPort: 9100             # ports internes des llama-server (${PORT})
+sendLoadingState: false     # ne pas glisser « chargement… » dans les réponses (le Studio lit du JSON)
+
+macros:
+  llama: /opt/llama.cpp-correctif/build/bin/llama-server
+  # garde-memoire : refuse de démarrer si le Studio a mis le chat en pause (vidéo, 3D) ou s'il manque de la mémoire
+  garde: /usr/local/bin/garde-memoire
+
+models:
+  "qwen3.8-flash-next":
+    name: "Qwen3.8 Flash-Next"
+    aliases: ["verif"]       # le vérificateur d'images du Studio demande le modèle « verif »
+    ttl: 1800                # libère la mémoire après 30 min sans message (avant : --sleep-idle-seconds 1800)
+    cmd: |
+      ${garde} 80 ${llama} --host 127.0.0.1 --port ${PORT}
+      -m /opt/models/qwen38-flash-next/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
+      --mmproj /opt/models/qwen38-flash-next/mmproj-Qwen3.8-Flash-Next-BF16.gguf
+      --chat-template-file /opt/models/qwen38-flash-next/chat_template.froggeric-v22.5.jinja --jinja
+      --reasoning-format deepseek --chat-template-kwargs '{"max_tool_response_chars":30000}'
+      -ngl 99 -fa on -c 262144 -np 2 --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 0
+      -md /opt/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-Q8_0.gguf --spec-type draft-mtp --spec-draft-n-max 3
+      --no-kv-unified -ctkd q8_0 -ctvd q8_0
+      --ctx-checkpoints 8 --checkpoint-min-step 2048
+
+  # Petit modèle pour les tâches d'Open WebUI (titres, tags, suggestions, requêtes de recherche) :
+  # remplace le qwen3.8:27b d'Ollama, qui prenait ~20 Go à chaque conversation.
+  "tache":
+    name: "Tâches (Qwen3.5 2B)"
+    ttl: 900
+    cmd: |
+      ${garde} 4 ${llama} --host 127.0.0.1 --port ${PORT}
+      -m /opt/models/taches/Qwen3.5-2B-Q8_0.gguf
+      -ngl 99 -fa on -c 16384 -np 2 --jinja --chat-template-kwargs '{"enable_thinking":false}'
+
+  # Embeddings pour la recherche dans les documents (remplace bge-m3 d'Ollama)
+  "bge-m3":
+    unlisted: true           # pas proposé dans la liste des modèles du chat
+    ttl: 900
+    cmd: |
+      ${garde} 2 ${llama} --host 127.0.0.1 --port ${PORT}
+      -m /opt/models/embeddings/bge-m3-Q8_0.gguf
+      --embeddings --pooling cls -ngl 99 -c 8192 -b 8192 -ub 8192
+
+routing:
+  router:
+    use: group
+    settings:
+      groups:
+        # les trois peuvent tourner ensemble (Flash-Next ~80 Go + ~3 Go pour les deux petits)
+        "chat":
+          swap: false
+          exclusive: false
+          members: ["qwen3.8-flash-next", "tache", "bge-m3"]

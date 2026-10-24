@@ -42,6 +42,7 @@ CREDS = os.environ.get("CREDENTIALS_DIRECTORY", "")
 MAIL_CONF = os.environ.get("MAIL_CONF") or (os.path.join(CREDS, "mail.env") if CREDS else "/opt/ai-stack/mcpo/mail/mail.env")
 RESUME_CONF = os.environ.get("RESUME_CONF") or (os.path.join(CREDS, "resume.env") if CREDS else "/opt/ai-stack/resume/resume.env")
 LLAMA = os.environ.get("LLAMA_URL", "http://127.0.0.1:8090")
+PAUSE = os.environ.get("STUDIO_PAUSE", "/run/studio-pause")  # posé par le Studio en mode llama-swap
 STUDIO = os.environ.get("STUDIO_URL", "http://127.0.0.1:8190/studio/api/jobs")
 ETAT_SAUVEGARDE = os.environ.get("ETAT_SAUVEGARDE", "/var/lib/sauvegarde-spark/etat.json")
 # STATE_DIRECTORY est fourni par systemd (StateDirectory=resume-matin)
@@ -221,6 +222,9 @@ def llama_pret(attente_max=1200):
     """Attend que Flash-Next réponde (il peut dormir, ou être en pause pendant une vidéo du Studio)."""
     t0 = time.time()
     while time.time() - t0 < attente_max:
+        if os.path.exists(PAUSE):  # avec llama-swap : le Studio a mis le chat en pause, on attend la fin de la vidéo
+            time.sleep(15)
+            continue
         try:
             if http_json(LLAMA + "/health", timeout=5).get("status") == "ok":
                 return True

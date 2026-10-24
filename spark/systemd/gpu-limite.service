@@ -1,7 +1,7 @@
 [Unit]
 Description=Limite la fréquence du GPU GB10 à 2100 MHz (anti-surchauffe, forum NVIDIA t/383939, ~1,6 % de perte)
 After=nvidia-persistenced.service
-Before=llama-flashnext.service
+Before=llama-flashnext.service llama-swap.service
 
 [Service]
 Type=oneshot

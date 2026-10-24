@@ -38,6 +38,11 @@ COMFY = "http://127.0.0.1:8188"
 COMFY_OUT = "/opt/ai-stack/comfyui/output"
 LLAMA = "http://127.0.0.1:8090"
 LLAMA_UNIT = "llama-flashnext"
+# « systemd » (par défaut) : le chat est arrêté/relancé avec systemctl. « swap » : llama-swap sert le chat sur LLAMA ;
+# on le vide par son API et on pose un fichier de pause que garde-memoire lit (voir spark/scripts/activer-llama-swap).
+LLAMA_MODE = os.environ.get("STUDIO_LLAMA", "systemd")
+LLAMA_MODELE = "qwen3.8-flash-next"
+PAUSE = os.environ.get("STUDIO_PAUSE", "/run/studio-pause")
 # Lecteur 3D servi en local (avant : CDN, donc pas de 3D sans internet). Copié dans MEDIA au démarrage,
 # car Caddy sert /studio/media sans mot de passe (l'iframe du chat ne peut pas en donner).
 VIEWER = "model-viewer-4.0.0.min.js"
@@ -94,11 +99,32 @@ def mem_go():
 
 # ---------------------------------------------------------------- llama / mémoire
 
-def llama_busy():
+def llama_charge():
+    """llama-swap : Flash-Next est-il chargé ? (interroger /upstream le chargerait, on demande d'abord /running)"""
     try:
-        return any(s.get("is_processing") for s in http("GET", LLAMA + "/slots", timeout=5))
+        return any(m.get("model") == LLAMA_MODELE and m.get("state") == "ready"
+                   for m in http("GET", LLAMA + "/running", timeout=5).get("running", []))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def llama_busy():
+    if LLAMA_MODE == "swap":
+        if not llama_charge():
+            return False
+        url = f"{LLAMA}/upstream/{LLAMA_MODELE}/slots"
+    else:
+        url = LLAMA + "/slots"
+    try:
+        return any(s.get("is_processing") for s in http("GET", url, timeout=5))
     except Exception:  # noqa: BLE001 — arrêté ou en veille : pas occupé
         return False
+
+
+def chat_en_pause():
+    if LLAMA_MODE == "swap":
+        return os.path.exists(PAUSE)
+    return subprocess.run(["systemctl", "is-active", "--quiet", LLAMA_UNIT]).returncode != 0
 
 
 def stop_llama(jid):
@@ -108,15 +134,40 @@ def stop_llama(jid):
         update(jid, etape="j'attends que le chat finisse sa réponse")
         time.sleep(3)
     update(jid, etape="je mets le chat en pause pour libérer la mémoire")
-    subprocess.run(["systemctl", "stop", LLAMA_UNIT], check=False)
+    if LLAMA_MODE == "swap":
+        # 1) plus aucun modèle ne peut redémarrer (garde-memoire lit ce fichier), 2) on vide tout
+        with open(PAUSE, "w") as f:
+            f.write(f"Studio {jid}\n")
+        try:
+            http("POST", LLAMA + "/api/models/unload", b"", {}, timeout=120)
+        except Exception as e:  # noqa: BLE001
+            log(f"llama-swap n'a pas pu tout décharger : {e}")
+        t0 = time.time()
+        while time.time() - t0 < 60:
+            try:
+                if not http("GET", LLAMA + "/running", timeout=5).get("running"):
+                    break
+            except Exception:  # noqa: BLE001
+                break
+            time.sleep(2)
+    else:
+        subprocess.run(["systemctl", "stop", LLAMA_UNIT], check=False)
 
 
 def start_llama():
-    subprocess.run(["systemctl", "start", "--no-block", LLAMA_UNIT], check=False)
-    t0 = time.time()
-    while time.time() - t0 < 300:
+    if LLAMA_MODE == "swap":
         try:
-            if http("GET", LLAMA + "/health", timeout=5).get("status") == "ok":
+            os.remove(PAUSE)
+        except FileNotFoundError:
+            pass
+        sante = f"{LLAMA}/upstream/{LLAMA_MODELE}/health"  # cette requête recharge Flash-Next tout de suite
+    else:
+        subprocess.run(["systemctl", "start", "--no-block", LLAMA_UNIT], check=False)
+        sante = LLAMA + "/health"
+    t0 = time.time()
+    while time.time() - t0 < 600:
+        try:
+            if http("GET", sante, timeout=60).get("status") == "ok":
                 return True
         except Exception:  # noqa: BLE001
             pass
@@ -369,7 +420,7 @@ def worker():
             update(jid, statut="échec", etape=str(e)[:400], fin=time.time())
         finally:
             comfy_free()
-            chat_arrete = subprocess.run(["systemctl", "is-active", "--quiet", LLAMA_UNIT]).returncode != 0
+            chat_arrete = chat_en_pause()
             if not llama_stopped and not (chat_arrete and todo.empty()):
                 update(jid, relance_chat="inutile")
             elif todo.empty():  # (une image passée derrière une vidéo relance aussi le chat)
@@ -744,7 +795,13 @@ def main():
             if j.get("statut") in ("en attente", "en cours"):
                 j.update(statut="échec", etape="interrompu (redémarrage du service)")
             j.pop("image_b64", None)
-        # Si le service a été coupé pendant une tâche, le chat est peut-être resté arrêté
+    # Si le service a été coupé pendant une tâche, le chat est peut-être resté en pause
+    if LLAMA_MODE == "swap":
+        try:
+            os.remove(PAUSE)
+        except FileNotFoundError:
+            pass
+    else:
         subprocess.run(["systemctl", "start", "--no-block", LLAMA_UNIT], check=False)
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=menage, daemon=True).start()

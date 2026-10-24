@@ -24,6 +24,13 @@ jobs:
       - name: Installer les outils de test
         run: pip install -r tests/requirements.txt ruff
 
+      - name: llama-swap (même version que spark/scripts/activer-llama-swap, empreinte vérifiée)
+        run: |
+          curl -fsSL -o /tmp/ls.tgz https://github.com/mostlygeek/llama-swap/releases/download/v266/llama-swap_266_linux_amd64.tar.gz
+          echo "7daa0170f997c1e60ebc749e8cb13f4ae9966fd73e9d5fca334770dcce5c4ab5  /tmp/ls.tgz" | sha256sum -c -
+          tar -xzf /tmp/ls.tgz -C /usr/local/bin llama-swap
+          llama-swap -config spark/llama-swap/config.yaml -validate
+
       - name: Erreurs Python (noms inconnus, variables oubliées…)
         run: ruff check --select F,E9 --target-version py311 .
 
@@ -31,6 +38,7 @@ jobs:
         run: >
           shellcheck -S warning spark/scripts/attendre-gpu spark/scripts/wait-mem spark/scripts/comfyui-free-idle
           sauvegardes/sauvegarde-spark proxmox-lxc/maj-languagetool spark/comfyui/download-models.sh
+          spark/scripts/garde-memoire spark/scripts/activer-llama-swap spark/scripts/revenir-sans-llama-swap
 
       - name: docker-compose valide
         working-directory: spark

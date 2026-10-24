@@ -600,7 +600,7 @@ def _graphique_7_jours(hist, aujourdhui):
             barre = (f'<div style="height:{max(vide - (16 if etiq else 0), 0)}px"></div>{etiq}'
                      + (f'<div style="background:{C["bleu_clair"]};height:{h_aut}px;border-radius:4px 4px 0 0;'
                         f'margin:0 auto;width:60%"></div>' if h_aut else "")
-                     + (f'<div style="height:2px"></div>' if h_aut and h_imp else "")
+                     + ('<div style="height:2px"></div>' if h_aut and h_imp else "")
                      + (f'<div style="background:{C["bleu"]};height:{h_imp}px;border-radius:{0 if h_aut else 4}px '
                         f'{0 if h_aut else 4}px 0 0;margin:0 auto;width:60%"></div>' if h_imp else ""))
         else:

@@ -80,6 +80,7 @@ def levenshtein(a, b, maxd):
     if abs(len(a) - len(b)) > maxd:
         return maxd + 1
     prev = list(range(len(b) + 1))
+    prev2 = prev  # ligne d'avant-avant (lettres inversées), remplie à partir de la 2e ligne
     for i, ca in enumerate(a, 1):
         cur = [i] + [0] * len(b)
         mini = i

@@ -6,5 +6,5 @@ v=$(unzip -Z1 /tmp/lt.zip | head -1 | cut -d/ -f1)
 [ -d "$v" ] && { rm /tmp/lt.zip; echo "déjà à jour ($v)"; exit 0; }
 unzip -q /tmp/lt.zip && rm /tmp/lt.zip && chown -R lt:lt "$v"
 ancien=$(readlink actuel); ln -sfn "/opt/lt/$v" actuel; systemctl restart languagetool
-for i in $(seq 60); do curl -sf "http://127.0.0.1:8081/v2/check?language=fr&text=test" >/dev/null && { echo "mis à jour : $v"; rm -rf "$ancien"; exit 0; }; sleep 5; done
+for _ in $(seq 60); do curl -sf "http://127.0.0.1:8081/v2/check?language=fr&text=test" >/dev/null && { echo "mis à jour : $v"; rm -rf "$ancien"; exit 0; }; sleep 5; done
 ln -sfn "$ancien" actuel; systemctl restart languagetool; rm -rf "/opt/lt/$v"; echo "échec, retour à $ancien"; exit 1

@@ -5,3 +5,5 @@ __pycache__/
 *.bak*
 *.token
 *.pass
+.pytest_cache/
+.ruff_cache/

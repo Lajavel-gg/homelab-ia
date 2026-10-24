@@ -556,7 +556,7 @@ class Tools:
                     "pour cette demande.")
         # garde le meilleur essai (le moins de problèmes)
         png, verdict, texte_final, nom_modele = min(essais, key=lambda e: (not e[1].get("ok"), len(e[1].get("problemes") or [])))
-        fichier = await _publier_image(png, __request__, __user__, __chat_id__, __message_id__, __event_emitter__)
+        await _publier_image(png, __request__, __user__, __chat_id__, __message_id__, __event_emitter__)
         await status(f"🎨 Image prête ({nom_modele}) ✅", True)
         if verdict.get("ok"):
             bilan = "La vérification automatique confirme que l'image correspond à la demande."

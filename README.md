@@ -103,8 +103,10 @@ Cette branche corrige le code (voir la pull request). Les étapes ci-dessous se 
 
 | Fichier du dépôt | Où le mettre | Puis |
 |---|---|---|
-| `mail/mail_mcp.py` | Spark : `/opt/ai-stack/mcpo/mail/` | `docker compose restart mcpo` |
-| `studio/runner.py` | Spark : `/opt/ai-stack/studio/` | `sudo systemctl restart studio-runner` |
+| `mail/mail_mcp.py` et `mail/config.json` | Spark : `/opt/ai-stack/mcpo/mail/` et `/opt/ai-stack/mcpo/config.json` | `docker compose restart mcpo` |
+| `studio/runner.py` et le dossier `studio/static/` | Spark : `/opt/ai-stack/studio/` | `sudo systemctl restart studio-runner` |
+| `spark/logrotate/homelab` | Spark : `/etc/logrotate.d/homelab` | rien |
+| `spark/scripts/verifier-modeles` | Spark : `/usr/local/bin/` | `verifier-modeles` : liste les modèles ComfyUI manquants |
 | `openwebui/outils/*.py`, `openwebui/filtres/correcteur_memoire.py` | Open WebUI → *Espace de travail → Outils / Fonctions* : remplacer le code de chacun | Enregistrer |
 | `spark/docker-compose.yml`, `spark/searxng/settings.yml` | Spark : `/opt/ai-stack/` | Vérifier que `.env` contient `SEARXNG_SECRET` (`openssl rand -hex 32`), puis `docker compose up -d` |
 | `proxmox-lxc/haproxy.cfg` | Conteneur 112 : `/etc/haproxy/haproxy.cfg` | `haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy` |
@@ -155,11 +157,34 @@ Puis dans Open WebUI, valves de l'outil Proxmox : `pool` = `agent` (les nouveaux
 
 À tester ensuite depuis le chat : « état du cluster », « arrête 110 » (doit être refusé), créer puis supprimer un conteneur de test. Si la création échoue sur les options `nesting`/`keyctl`, noter le message d'erreur exact.
 
-Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 4).
+Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 6).
 
-### 4. À faire ensuite (moins urgent)
+### 4. Mémoire du Spark pleine « au bout d'un moment »
 
-- **Figer les versions** : `open-webui:main` est une version de développement, pas une version stable. Utiliser par exemple `ghcr.io/open-webui/open-webui:v0.12.3`, et des versions précises au lieu de `:latest` (Qdrant, SearXNG, Jupyter, Vaultwarden…) et de `npx -y` / `uvx` sans version dans `mail/config.json` (attaques npm de 2025-2026).
+Deux suspects, à vérifier **au moment où c'est plein** :
+
+```bash
+free -g                       # grosse colonne buff/cache → suspect 2
+ollama ps                     # qwen3.8:27b chargé → suspect 1
+ps aux --sort=-rss | head -8  # qui prend le plus
+```
+
+1. **Le modèle des tâches d'Open WebUI** (titres, tags, suggestions) est `qwen3.8:27b` dans Ollama : il se charge à chaque conversation en plus de Flash-Next (~80 Go) et reste 15 min. Solutions : un petit modèle (2-3 B) dans `TASK_MODEL`, ou couper les suggestions/tags (*Réglages admin → Interface*) ; et dans `ollama.service.d/override.conf` : `OLLAMA_KEEP_ALIVE=2m`, `OLLAMA_NUM_PARALLEL=1`.
+2. **Le cache disque** : sur le GB10, la mémoire est partagée CPU/GPU et le cache des gros fichiers (modèles vidéo) ne se libère pas assez vite. NVIDIA le documente et conseille : `sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'` (sans risque). À ajouter ensuite dans le runner avant chaque vidéo si c'est bien ça.
+
+### 5. Qualité des images et vidéos (après avoir réglé la mémoire)
+
+Tout est réglé en mode « rapide et léger », comme pour une petite carte graphique : modèles Turbo (8 étapes), compressés en int8, en basse résolution. Le Spark peut faire bien mieux :
+
+- **Résolution** : Qwen-Image 2.1 est fait pour 2048×2048 à 2752×1536 ; le Studio l'utilise en ~1024.
+- **Versions pleines** : Qwen-Image 2.1 Turbo existe en bf16 ; Z-Image **Base** (non distillé, 30-50 étapes, CFG 3-5) donne plus de détails que Z-Image Turbo.
+- **Vidéo** : résolution native de MiniMax H3 = 1344×768 ; la qualité par défaut « rapide » est en 864×480. Passer « bonne » par défaut, et 25 étapes pour « meilleure » (conseil de la doc ComfyUI).
+- Méthode : comparer d'abord dans l'interface ComfyUI (port 8443) avec les modèles officiels, puis ajouter un mode « qualité max » au Studio.
+
+### 6. À faire ensuite (moins urgent)
+
+- **Figer les versions** : `open-webui:main` est une version de développement, pas une version stable. Utiliser par exemple `ghcr.io/open-webui/open-webui:v0.12.3`, et des versions précises au lieu de `:latest` (Qdrant, SearXNG, Jupyter, Vaultwarden…) (les serveurs MCP de `mail/config.json` sont déjà figés dans cette branche).
+- **Remplacer du code maison par des outils existants** : llama-swap (charge/décharge les modèles à la demande, le chat ne « disparaît » plus pendant les vidéos) et suppression d'Ollama (llama-swap sert aussi bge-m3 et un petit modèle de tâches) ; Proxmox Backup Server pour les sauvegardes des machines ; Diun ou Renovate pour être prévenu des nouvelles versions ; options mémoire de ComfyUI (`--disable-smart-memory`) au lieu du timer qui le vide toutes les 5 min.
 - **Vaultwarden** : passer en 1.37.4 ou plus (7 failles corrigées), activer la double authentification, et n'accepter le port 8080 que depuis HAProxy (pare-feu Proxmox sur le conteneur 110, source 192.168.0.212).
 - **wg-easy** : activer la double authentification de l'interface ; charger `wireguard` sur l'hôte Proxmox puis retirer `SYS_MODULE` et le montage `/lib/modules`.
 - **Modèle des tâches** (titres, tags, requêtes de recherche) : un petit modèle (2-3 B) au lieu du 27 B, comme le conseille la doc d'Open WebUI.

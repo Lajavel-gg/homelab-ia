@@ -57,6 +57,9 @@ with open(LEXIQUE, encoding="utf-8") as f:
         k = lex_key(c[i_p])
         PAR_SON[k][mot] = max(PAR_SON[k].get(mot, 0), freq)
 CLES = list(PAR_SON)
+CLES_PAR_LONGUEUR = defaultdict(list)  # longueur → clés : on ne compare qu'aux clés de longueur ±1
+for _k in CLES:
+    CLES_PAR_LONGUEUR[len(_k)].append(_k)
 
 
 def sans_accents(m):
@@ -125,8 +128,8 @@ def proches(cle, n=6):
     if len(cle) < 3:
         return [], ""
     cands = {}
-    for k in CLES:
-        if abs(len(k) - len(cle)) <= 1 and distance1(k, cle):
+    for k in (k for L in (len(cle) - 1, len(cle), len(cle) + 1) for k in CLES_PAR_LONGUEUR.get(L, ())):
+        if distance1(k, cle):
             for m, fq in PAR_SON[k].items():
                 cands[m] = max(cands.get(m, 0), fq)
     best = sorted(cands.items(), key=lambda x: -x[1])

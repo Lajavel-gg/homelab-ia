@@ -1,0 +1,11 @@
+# À copier dans /etc/logrotate.d/homelab — ces journaux étaient écrits en « append: » sans jamais être vidés.
+# copytruncate : systemd garde le fichier ouvert, on le vide sur place au lieu de le déplacer.
+/var/log/sauvegarde-spark.log /var/log/correcteur-apprendre.log {
+    monthly
+    rotate 6
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

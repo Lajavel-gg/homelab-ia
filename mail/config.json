@@ -3,21 +3,21 @@
     "time": {
       "command": "uvx",
       "args": [
-        "mcp-server-time",
+        "mcp-server-time==2026.10.19",
         "--local-timezone=Europe/Paris"
       ]
     },
     "fetch": {
       "command": "uvx",
       "args": [
-        "mcp-server-fetch"
+        "mcp-server-fetch==2026.10.19"
       ]
     },
     "filesystem": {
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-filesystem",
+        "@modelcontextprotocol/server-filesystem@1.0.0",
         "/workspace"
       ]
     },
@@ -25,7 +25,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-sequential-thinking"
+        "@modelcontextprotocol/server-sequential-thinking@1.0.0"
       ]
     },
     "browser": {
@@ -44,7 +44,7 @@
         "run",
         "-q",
         "--with",
-        "mcp",
+        "mcp==1.30.0",
         "python",
         "/app/mail/mail_mcp.py"
       ]

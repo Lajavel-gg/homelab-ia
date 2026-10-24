@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""verifier-modeles [dossier_modeles] [dossier_studio]
+
+Liste les modèles ComfyUI dont le Studio a besoin (workflows + LoRA des qualités vidéo) et dit lesquels
+manquent sur le disque. Utile après une réinstallation : download-models.sh n'est pas complet.
+"""
+import ast
+import json
+import os
+import sys
+
+MODELES = sys.argv[1] if len(sys.argv) > 1 else "/opt/ai-stack/comfyui/models"
+STUDIO = sys.argv[2] if len(sys.argv) > 2 else "/opt/ai-stack/studio"
+EXT = (".safetensors", ".gguf", ".pt", ".pth", ".ckpt", ".bin")
+
+
+def noms_dans(objet, out):
+    if isinstance(objet, dict):
+        for v in objet.values():
+            noms_dans(v, out)
+    elif isinstance(objet, (list, tuple)):
+        for v in objet:
+            noms_dans(v, out)
+    elif isinstance(objet, str) and objet.lower().endswith(EXT):
+        out.add(objet)
+
+
+besoins = {}  # nom de fichier → où il est utilisé
+dossier_wf = os.path.join(STUDIO, "workflows")
+for f in sorted(os.listdir(dossier_wf)):
+    if f.endswith(".json"):
+        noms = set()
+        noms_dans(json.load(open(os.path.join(dossier_wf, f))), noms)
+        for n in noms:
+            besoins.setdefault(n, []).append(f)
+
+# LoRA ajoutées par runner.py selon la qualité vidéo (dictionnaire QUALITES)
+runner = os.path.join(STUDIO, "runner.py")
+if os.path.exists(runner):
+    for noeud in ast.walk(ast.parse(open(runner).read())):
+        if isinstance(noeud, ast.Assign) and getattr(noeud.targets[0], "id", "") == "QUALITES":
+            noms = set()
+            noms_dans(ast.literal_eval(noeud.value), noms)
+            for n in noms:
+                besoins.setdefault(n, []).append("runner.py (qualités vidéo)")
+
+presents = set()
+for racine, _, fichiers in os.walk(MODELES, followlinks=True):
+    presents.update(fichiers)
+
+manquants = {n: u for n, u in besoins.items() if os.path.basename(n) not in presents}
+for n in sorted(besoins):
+    print(("MANQUANT  " if n in manquants else "ok        ") + n + "   ← " + ", ".join(sorted(set(besoins[n]))))
+print(f"\n{len(besoins) - len(manquants)}/{len(besoins)} modèles présents dans {MODELES}")
+sys.exit(1 if manquants else 0)

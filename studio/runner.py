@@ -36,6 +36,9 @@ COMFY = "http://127.0.0.1:8188"
 COMFY_OUT = "/opt/ai-stack/comfyui/output"
 LLAMA = "http://127.0.0.1:8090"
 LLAMA_UNIT = "llama-flashnext"
+# Lecteur 3D servi en local (avant : CDN, donc pas de 3D sans internet). Copié dans MEDIA au démarrage,
+# car Caddy sert /studio/media sans mot de passe (l'iframe du chat ne peut pas en donner).
+VIEWER = "model-viewer-4.0.0.min.js"
 
 lock = threading.Lock()
 jobs: dict = {}
@@ -195,8 +198,12 @@ def run_workflow(wf, jid, label):
 
 def publish(src, ext):
     name = f"{uuid.uuid4().hex}{ext}"
-    shutil.copy2(src, os.path.join(MEDIA, name))
-    os.chmod(os.path.join(MEDIA, name), 0o644)
+    dst = os.path.join(MEDIA, name)
+    try:
+        os.link(src, dst)  # lien dur : même fichier, pas de 2e copie sur le disque (vidéos de plusieurs centaines de Mo)
+    except OSError:  # autre disque ou système de fichiers : copie classique
+        shutil.copy2(src, dst)
+    os.chmod(dst, 0o644)
     return "/studio/media/" + name
 
 
@@ -365,7 +372,7 @@ def worker():
 
 PAGE = """<!doctype html><html lang=fr><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Studio</title>
-<script type=module src="https://cdn.jsdelivr.net/npm/@google/model-viewer@4.0.0/dist/model-viewer.min.js"></script>
+<script type=module src="/studio/media/model-viewer-4.0.0.min.js"></script>
 <style>body{font-family:system-ui;background:#111;color:#eee;margin:0;padding:16px}
 .c{background:#1c1c1c;border-radius:12px;padding:12px;margin:0 0 16px;max-width:900px}
 video,model-viewer{width:100%;max-height:70vh;height:60vh;background:#000;border-radius:8px}
@@ -446,6 +453,10 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     os.makedirs(MEDIA, exist_ok=True)
+    src = os.path.join(BASE, "static", VIEWER)
+    if os.path.exists(src):
+        shutil.copyfile(src, os.path.join(MEDIA, VIEWER))
+        os.chmod(os.path.join(MEDIA, VIEWER), 0o644)
     if os.path.exists(JOBS_FILE):
         with open(JOBS_FILE) as f:
             jobs.update(json.load(f))

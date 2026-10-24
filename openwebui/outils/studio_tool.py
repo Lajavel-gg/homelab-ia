@@ -239,7 +239,7 @@ def _embed(job, base=""):
         body = f'<img src="{url}" style="display:block;width:100%;max-height:720px;object-fit:contain;border-radius:10px">'
     elif job.get("format") == "glb":
         body = (
-            '<script type="module" src="https://cdn.jsdelivr.net/npm/@google/model-viewer@4.0.0/dist/model-viewer.min.js"></script>'
+            '<script type="module" src="/studio/media/model-viewer-4.0.0.min.js"></script>'
             f'<model-viewer src="{url}" camera-controls auto-rotate shadow-intensity="1" exposure="1.1" '
             'style="display:block;width:100%;height:420px;background:#1b1b1b;border-radius:10px"></model-viewer>'
         )

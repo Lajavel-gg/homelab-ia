@@ -71,9 +71,12 @@ def _erreur(e: Exception) -> str:
     return f"Erreur mail : {e}"
 
 
+def _caps(m) -> set[str]:
+    return {(c.decode() if isinstance(c, bytes) else str(c)).upper() for c in (m.capabilities or ())}
+
+
 def _is_gmail(m) -> bool:
-    caps = m.capabilities or ()
-    return any((c.decode() if isinstance(c, bytes) else str(c)).upper() == "X-GM-EXT-1" for c in caps)
+    return "X-GM-EXT-1" in _caps(m)
 
 
 def _dec(v) -> str:
@@ -331,14 +334,20 @@ def archiver(uids: str) -> str:
                 dest = _special(m, "\\Archive", ["Archive", "Archives"]) or "Archive"
                 m.create(_q(dest))
             if cibles:
+                caps = _caps(m)
                 m.select("INBOX")
                 for i in range(0, len(cibles), 50):
                     lot = ",".join(cibles[i:i + 50])
-                    typ, _ = m.uid("MOVE", lot, _q(dest))
-                    if typ != "OK":  # serveur sans MOVE : copie puis retrait de la réception
-                        m.uid("COPY", lot, _q(dest))
-                        m.uid("STORE", lot, "+FLAGS", "(\\Deleted)")
-                        m.expunge()
+                    if "MOVE" in caps:
+                        m.uid("MOVE", lot, _q(dest))
+                        continue
+                    # Serveur sans MOVE : copie, puis retrait de la réception de CES mails seulement.
+                    # Jamais de EXPUNGE simple : il effacerait aussi tous les autres mails marqués \Deleted.
+                    typ, _ = m.uid("COPY", lot, _q(dest))
+                    if typ != "OK" or "UIDPLUS" not in caps:
+                        continue  # copiés (ou non) mais laissés dans la réception : rien n'est effacé
+                    m.uid("STORE", lot, "+FLAGS", "(\\Deleted)")
+                    m.uid("EXPUNGE", lot)
             apres = _presents(m, "INBOX", cibles)
             echecs = [u for u in cibles if u in apres]
             msg = _bilan(len(cibles) - len(echecs), len(liste), "archivé(s) (toujours consultables, rien de supprimé)", echecs)

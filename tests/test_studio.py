@@ -129,7 +129,7 @@ def test_api(api, studio):
     assert api("DELETE", "/studio/api/jobs/dddddddddd")[0] == 404
     assert api("DELETE", "/studio/api/jobs/../../etc")[0] == 404
     assert api("GET", "/studio/api/place")[0] == 200
-    assert api("POST", "/studio/api/jobs", entetes={"content-length": str(100 * 2**20)})[0] == 413
+    assert api("POST", "/studio/api/jobs", entetes={"content-length": str(500 * 2**20)})[0] == 413
 
 
 def page_js():

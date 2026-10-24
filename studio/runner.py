@@ -25,10 +25,13 @@ import threading
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import manga  # traduction de manga (studio/manga.py)
 
 BASE = "/opt/ai-stack/studio"
 MEDIA = os.path.join(BASE, "media")
@@ -71,7 +74,8 @@ def save():
     with lock:
         tmp = JOBS_FILE + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(jobs, f, ensure_ascii=False, indent=1)
+            json.dump({k: {x: y for x, y in v.items() if not x.endswith("_b64")} for k, v in jobs.items()}, f,
+                      ensure_ascii=False, indent=1)
         os.replace(tmp, JOBS_FILE)
 
 
@@ -319,6 +323,12 @@ def process(jid):
     if kind == "video_longue":
         return long_video(jid, j, seed)
 
+    if kind == "manga":
+        return manga_chapitre(jid, j)
+
+    if kind == "manga_page":
+        return manga_refaire(jid, j)
+
     # vidéo
     secondes = max(2, min(int(j.get("secondes") or 5), 10))
     comfy_free()
@@ -411,9 +421,12 @@ def worker():
         jid = todo.get()
         llama_stopped = False
         try:
-            if jobs[jid]["type"] != "image":
+            if jobs[jid]["type"] in AVEC_PAUSE:
                 stop_llama(jid)
                 llama_stopped = True
+            elif jobs[jid]["type"] in ("manga", "manga_page") and chat_en_pause():
+                update(jid, etape="je relance le chat (il traduit les bulles)")
+                start_llama()
             update(jid, statut="en cours", debut=time.time())
             res = process(jid)
             update(jid, statut="terminé", etape="terminé", fin=time.time(), **res)
@@ -432,14 +445,135 @@ def worker():
                 update(jid, relance_chat="ok" if ok else "échec")
 
 
+# ---------------------------------------------------------------- manga
+
+AVEC_PAUSE = ("video", "video_image", "video_longue", "3d", "3d_texte")  # ont besoin de toute la mémoire
+
+
+def _pages_triees(dossier):
+    return sorted(os.path.join(dossier, n) for n in os.listdir(dossier)) if os.path.isdir(dossier) else []
+
+
+def manga_chapitre(jid, j):
+    serie, langue = j.get("serie") or "Sans titre", j.get("langue") or "auto"
+    dossier = os.path.join(manga.TRAVAIL, jid)
+    fichiers = [(str(f.get("nom", "page")), base64.b64decode(f.get("b64", ""))) for f in j.pop("fichiers_b64", None) or []]
+    save()
+    update(jid, etape="je lis les fichiers")
+    pages = manga.pages_depuis_fichiers(fichiers, os.path.join(dossier, "entree"))
+    del fichiers
+    update(jid, nb_pages=len(pages), etape=f"{len(pages)} page(s) à traduire")
+    comfy_free()  # ComfyUI rend sa mémoire ; manga-image-translator et le chat en ont besoin
+    sortie = os.path.join(dossier, "sortie")
+    os.makedirs(sortie, exist_ok=True)
+    chemin_consignes = manga.consignes(serie)
+    rendus, erreurs = [], []
+    try:
+        conf = manga.configuration(langue, chemin_consignes)
+        for i, p in enumerate(pages, 1):
+            update(jid, etape=f"page {i}/{len(pages)}", page=i)
+            try:
+                dst = os.path.join(sortie, f"{i:04d}.png")
+                with open(dst, "wb") as f:
+                    f.write(manga.traduire_page(p, conf))
+            except Exception as e:  # noqa: BLE001
+                if "injoignable" in str(e):
+                    raise
+                log(f"{jid} page {i} : {e}")
+                erreurs.append(i)  # on garde la page d'origine : le chapitre reste complet
+                dst = os.path.join(sortie, f"{i:04d}{os.path.splitext(p)[1]}")
+                shutil.copyfile(p, dst)
+            rendus.append(dst)
+    finally:
+        os.remove(chemin_consignes)
+    if len(erreurs) == len(pages):
+        raise RuntimeError("aucune page n'a pu être traduite")
+    update(jid, etape="je prépare le .cbz")
+    publiees = [publish(r, os.path.splitext(r)[1]) for r in rendus]
+    archive = manga.cbz(rendus, os.path.join(dossier, "chapitre.cbz"))
+    return {"fichier": publish(archive, ".cbz"), "format": "cbz", "pages": publiees, "apercu": publiees[0],
+            "pages_non_traduites": erreurs}
+
+
+def manga_refaire(jid, j):
+    """Retraduit une page d'un chapitre avec la remarque du lecteur, puis met à jour le chapitre et son .cbz."""
+    parent, n, remarque = j.get("parent", ""), int(j.get("page") or 0), j.get("remarque", "")
+    with lock:
+        chap = dict(jobs.get(parent) or {})
+    if chap.get("type") != "manga" or chap.get("statut") != "terminé":
+        raise RuntimeError("chapitre introuvable (ou archivé) : renvoie le chapitre en entier")
+    dossier = os.path.join(manga.TRAVAIL, parent)
+    entrees, sorties = _pages_triees(os.path.join(dossier, "entree")), _pages_triees(os.path.join(dossier, "sortie"))
+    if not 1 <= n <= len(entrees):
+        raise RuntimeError(f"page {n} inexistante : le chapitre a {len(entrees)} page(s)")
+    update(jid, etape=f"je retraduis la page {n}", serie=chap.get("serie"))
+    comfy_free()
+    chemin_consignes = manga.consignes(chap.get("serie") or "Sans titre", remarque)
+    try:
+        png = manga.traduire_page(entrees[n - 1], manga.configuration(chap.get("langue") or "auto", chemin_consignes))
+    finally:
+        os.remove(chemin_consignes)
+    ancienne = sorties[n - 1]
+    nouvelle = os.path.join(os.path.dirname(ancienne), f"{n:04d}.png")
+    if ancienne != nouvelle:
+        os.remove(ancienne)
+    with open(nouvelle, "wb") as f:
+        f.write(png)
+    sorties = _pages_triees(os.path.join(dossier, "sortie"))
+    url_page = publish(nouvelle, ".png")
+    url_cbz = publish(manga.cbz(sorties, os.path.join(dossier, "chapitre.cbz")), ".cbz")
+    with lock:
+        c = jobs.get(parent)
+        if c is None:
+            raise RuntimeError("chapitre supprimé pendant la retraduction")
+        anciens = [c["pages"][n - 1], c.get("fichier")]
+        c["pages"][n - 1] = url_page
+        c["fichier"] = url_cbz
+        c["apercu"] = c["pages"][0]
+        c["pages_non_traduites"] = [x for x in c.get("pages_non_traduites", []) if x != n]
+    for a in anciens:  # l'ancienne version de la page et l'ancien .cbz
+        m = RE_MEDIA.fullmatch(str(a or ""))
+        if m and os.path.exists(os.path.join(MEDIA, m.group(1))):
+            os.remove(os.path.join(MEDIA, m.group(1)))
+    save()
+    return {"parent": parent, "page": n, "page_url": url_page}  # pas de « fichier » : la page appartient au chapitre
+
+
+def page_liseuse(j):
+    """Liseuse d'un chapitre traduit : pages les unes sous les autres, adaptée au téléphone."""
+    import html as h
+    if j.get("type") != "manga" or j.get("statut") != "terminé":
+        return ("<!doctype html><meta charset=utf-8><body style='font-family:system-ui;background:#0e0e10;color:#ddd;"
+                "padding:24px'>Ce chapitre n'est pas (ou plus) sur le Spark. <a style='color:#9b8cff' href='/studio/'>Galerie"
+                "</a></body>")
+    pages = [p for p in j.get("pages") or [] if RE_MEDIA.fullmatch(str(p))]
+    cbz_url = j.get("fichier") if RE_MEDIA.fullmatch(str(j.get("fichier") or "")) else ""
+    titre = h.escape(f"{j.get('serie') or 'Manga'}")
+    manque = j.get("pages_non_traduites") or []
+    note = (f"<p class=n>Page(s) laissée(s) en version originale : {h.escape(', '.join(map(str, manque)))}. "
+            "Demande à l'agent de les refaire.</p>") if manque else ""
+    images = "".join(f'<figure><img src="{p}" loading=lazy alt="page {i}"><figcaption>{i}/{len(pages)}</figcaption></figure>'
+                     for i, p in enumerate(pages, 1))
+    return f"""<!doctype html><html lang=fr><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>{titre}</title><style>
+body{{margin:0;background:#0e0e10;color:#e4e4e7;font:15px/1.4 system-ui,-apple-system,sans-serif}}
+header{{position:sticky;top:0;z-index:2;display:flex;gap:10px;align-items:center;padding:10px 14px;background:#0e0e10e6;
+backdrop-filter:blur(8px);border-bottom:1px solid #27272a}}header b{{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+a.b{{color:#e4e4e7;text-decoration:none;border:1px solid #3f3f46;border-radius:8px;padding:5px 11px;font-size:13px}}
+main{{max-width:900px;margin:0 auto}}figure{{margin:0 0 6px}}img{{display:block;width:100%;height:auto}}
+figcaption{{text-align:center;color:#71717a;font-size:12px;padding:4px 0 10px}}.n{{color:#f5b942;padding:0 14px}}
+</style></head><body><header><b>{titre}</b>{f'<a class=b href="{cbz_url}?dl=1" download>Télécharger .cbz</a>' if cbz_url else ''}
+<a class=b href="/studio/">Galerie</a></header><main>{note}{images}</main></body></html>"""
+
+
 # ---------------------------------------------------------------- ménage
 
 def fichiers_du_job(j):
     """Fichiers de MEDIA qui appartiennent à une création (le rendu et l'aperçu), noms vérifiés."""
     out = []
-    for cle in ("fichier", "apercu"):
-        m = RE_MEDIA.fullmatch(str(j.get(cle) or ""))
-        if m:
+    for valeur in [j.get("fichier"), j.get("apercu")] + list(j.get("pages") or []):
+        m = RE_MEDIA.fullmatch(str(valeur or ""))
+        if m and os.path.join(MEDIA, m.group(1)) not in out:
             out.append(os.path.join(MEDIA, m.group(1)))
     return out
 
@@ -458,6 +592,7 @@ def supprimer_job(jid):
             os.remove(f)
         except FileNotFoundError:
             pass
+    shutil.rmtree(os.path.join(manga.TRAVAIL, jid), ignore_errors=True)
     save()
     return "ok"
 
@@ -487,13 +622,14 @@ def archiver_job(jid):
         noms = []
         for f in fichiers_du_job(j):
             if os.path.exists(f):
-                nom = _nom_lisible(j, jid, f) if not noms else _nom_lisible(j, jid + "_apercu", f)
+                nom = _nom_lisible(j, jid if not noms else f"{jid}_{len(noms):03d}", f)
                 try:
                     os.link(f, os.path.join(envoi, nom))  # lien dur : pas de copie sur le disque
                 except OSError:
                     shutil.copy2(f, os.path.join(envoi, nom))
                 noms.append(nom)
-        fiche = {k: j.get(k) for k in ("type", "prompt", "style", "scenes", "qualite", "secondes", "format", "modele", "statut", "etape")}
+        fiche = {k: j.get(k) for k in ("type", "prompt", "style", "scenes", "qualite", "secondes", "format", "modele", "statut",
+                                       "etape", "serie", "langue", "nb_pages") if j.get(k) is not None}
         fiche.update(id=jid, cree=datetime.fromtimestamp(j.get("cree", 0)).isoformat(timespec="seconds"), fichiers=noms)
         with open(os.path.join(envoi, _nom_lisible(j, jid, "fiche.json")), "w") as f:
             json.dump(fiche, f, ensure_ascii=False, indent=1)
@@ -511,11 +647,13 @@ def archiver_job(jid):
         jobs[jid].update(statut="archivé", archive=f"{sous}/", archive_fichiers=noms, archive_le=time.time())
         jobs[jid].pop("fichier", None)
         jobs[jid].pop("apercu", None)
+        jobs[jid].pop("pages", None)
     for f in fichiers_du_job(j):
         try:
             os.remove(f)
         except FileNotFoundError:
             pass
+    shutil.rmtree(os.path.join(manga.TRAVAIL, jid), ignore_errors=True)
     save()
     return "ok"
 
@@ -640,19 +778,20 @@ h1{font-size:28px;margin:0;letter-spacing:-.02em}.sous{color:var(--texte2);font-
 // qu'Open WebUI, une injection HTML pourrait y voler la session. Seuls les liens /studio/media/<hex> sont acceptés.
 const e=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const media=f=>/^\/studio\/media\/[0-9a-f]{32}\.[a-z0-9]{2,4}$/.test(f||'')?f:'';
-const TYPES={image:'Image',video:'Vidéo',video_image:'Animation',video_longue:'Vidéo longue','3d':'3D','3d_texte':'3D'};
-const FAMILLE=t=>t=='image'?'image':(t||'').startsWith('3d')?'3d':'video';
+const TYPES={image:'Image',video:'Vidéo',video_image:'Animation',video_longue:'Vidéo longue','3d':'3D','3d_texte':'3D',manga:'Manga'};
+const FAMILLE=t=>t=='image'?'image':t=='manga'?'manga':(t||'').startsWith('3d')?'3d':'video';
 const ETATS={'terminé':['Terminée','var(--bon)'],'échec':['Échec','var(--critique)'],'en cours':['En cours','var(--accent)'],
  'en attente':['En attente','var(--attention)'],'archivé':['Archivée sur pve2','var(--discret)']};
-const FILTRES=[['tout','Tout'],['image','Images'],['video','Vidéos'],['3d','3D'],['garde','Gardées'],['archive','Archivées'],['echec','Échecs']];
+const FILTRES=[['tout','Tout'],['image','Images'],['video','Vidéos'],['3d','3D'],['manga','Mangas'],['garde','Gardées'],['archive','Archivées'],['echec','Échecs']];
 let filtre='tout',jobs={},avant='',infos={};
 function ilya(t){const s=Date.now()/1000-t;if(s<90)return"à l'instant";if(s<3600)return`il y a ${Math.round(s/60)} min`;
  if(s<86400)return`il y a ${Math.round(s/3600)} h`;if(s<86400*30)return`il y a ${Math.round(s/86400)} j`;
  return new Date(t*1000).toLocaleDateString('fr-FR',{day:'numeric',month:'short',year:'numeric'})}
 function garde(x){return!!x.garder}
-function dans(x,f){return f=='tout'?x.statut!='archivé':f=='garde'?garde(x)&&x.statut!='archivé':f=='archive'?x.statut=='archivé':
+function dans(x,f){if(x.type=='manga_page')return false;return f=='tout'?x.statut!='archivé':f=='garde'?garde(x)&&x.statut!='archivé':f=='archive'?x.statut=='archivé':
  f=='echec'?x.statut=='échec':x.statut!='archivé'&&FAMILLE(x.type)==f}
 function apercu(x){const f=media(x.fichier);
+ if(x.statut=='terminé'&&x.format=='cbz'&&media(x.apercu))return`<img src="${media(x.apercu)}" loading=lazy alt="">`;
  if(x.statut=='terminé'&&f)return x.format=='image'?`<img src="${f}" loading=lazy alt="">`:x.format=='glb'?
   `<model-viewer src="${f}" camera-controls auto-rotate shadow-intensity=1></model-viewer>`:`<video src="${f}" controls loop playsinline preload=metadata></video>`;
  if(x.statut=='en cours'||x.statut=='en attente')return`<div class=vide>${e(x.etape||'…')}</div><div class=barre></div>`;
@@ -661,7 +800,8 @@ function apercu(x){const f=media(x.fichier);
 function carte(id,x){if(!/^[0-9a-f]{10}$/.test(id))return'';
  const [nomEtat,couleur]=ETATS[x.statut]||[x.statut,'var(--discret)'],f=media(x.fichier),fini=x.statut=='terminé'||x.statut=='échec';
  let a='',b='';
- if(x.statut=='terminé'&&f)a+=`<a href="${f}?dl=1" download>Télécharger</a>`;
+ if(x.statut=='terminé'&&x.format=='cbz')a+=`<a href="/studio/manga/${id}" target=_blank>Lire</a>`;
+ if(x.statut=='terminé'&&f)a+=`<a href="${f}?dl=1" download>${x.format=='cbz'?'.cbz':'Télécharger'}</a>`;
  if(x.statut=='terminé'&&infos.archive)a+=`<button onclick="arc('${id}')" title="Envoyer sur pve2 et libérer le Spark">Archiver</button>`;
  if(fini)b+=`<button class="ico ${garde(x)?'on':''}" onclick="gar('${id}',${!garde(x)})" title="${garde(x)?'Gardée : jamais archivée ni supprimée automatiquement':'Garder sur le Spark'}" aria-label="Garder">${garde(x)?'★':'☆'}</button>`;
  if(fini||x.statut=='archivé')b+=`<button class="ico danger" onclick="sup('${id}')" title="Supprimer" aria-label="Supprimer">✕</button>`;
@@ -671,7 +811,7 @@ function carte(id,x){if(!/^[0-9a-f]{10}$/.test(id))return'';
  return`<div class="c${x.statut=='en cours'?' encours':''}"><div class="media${court?' court':''}">${apercu(x)}</div><div class=corps>
 <div class=haut><span class=badge>${e(TYPES[x.type]||x.type)}</span><span class=etat style="--couleur:${couleur}">${e(nomEtat)}</span>
 <span style="margin-left:auto" title="${e(new Date(x.cree*1000).toLocaleString('fr-FR'))}">${e(ilya(x.cree))}</span></div>
-<div class=prompt onclick="this.classList.toggle('ouvert')">${e(x.prompt||x.style||'(sans description)')}</div>${detail}
+<div class=prompt onclick="this.classList.toggle('ouvert')">${e(x.type=='manga'?(x.serie||'Manga')+(x.nb_pages?' · '+x.nb_pages+' pages':''):(x.prompt||x.style||'(sans description)'))}</div>${detail}
 <div class=actions>${a}</div></div></div>`}
 function rendre(j,f){const l=Object.entries(j).filter(([,x])=>dans(x,f)).sort((a,b)=>(b[1].cree||0)-(a[1].cree||0));
  return l.length?l.map(([id,x])=>carte(id,x)).join(''):`<div class=vide-liste>Rien ici pour l'instant.</div>`}
@@ -715,14 +855,24 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, PAGE, "text/html")
         if p == "/studio/api/jobs":
             with lock:
-                return self.send(200, {k: {x: y for x, y in v.items() if x != "image_b64"} for k, v in jobs.items()})
+                return self.send(200, {k: {x: y for x, y in v.items() if not x.endswith("_b64")} for k, v in jobs.items()})
+        if p == "/studio/api/manga/series":
+            return self.send(200, manga.lister_series())
+        if p == "/studio/api/manga/carnet":
+            serie = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("serie", [""])[0]
+            return self.send(200, manga.carnet(serie))
+        m = re.fullmatch(r"/studio/manga/([0-9a-f]{10})", p)
+        if m:
+            with lock:
+                j = dict(jobs.get(m.group(1)) or {})
+            return self.send(200 if j else 404, page_liseuse(j), "text/html")
         if p == "/studio/api/place":
             return self.send(200, {"octets": place_utilisee(), "garder_jours": GARDER_JOURS if (ARCHIVE or MENAGE_SUPPRIMER) else 0, "archive": bool(ARCHIVE)})
         if p.startswith("/studio/api/jobs/"):
             jid = p.rsplit("/", 1)[1]
             with lock:
                 j = jobs.get(jid)
-                j = {x: y for x, y in j.items() if x != "image_b64"} if j else None
+                j = {x: y for x, y in j.items() if not x.endswith("_b64")} if j else None
             if j:
                 j["position"] = list(todo.queue).index(jid) + 1 if jid in todo.queue else 0
             return self.send(200 if j else 404, j or {"erreur": "inconnu"})
@@ -758,17 +908,31 @@ class H(BaseHTTPRequestHandler):
                 jobs[m.group(1)]["garder"] = garder
             save()
             return self.send(200, {"ok": True, "garder": garder})
+        if self.path.split("?")[0].rstrip("/") == "/studio/api/manga/carnet":
+            try:
+                req = json.loads(self.rfile.read(min(n, 100_000)) or b"{}")
+                if req.get("oublier"):
+                    return self.send(200, {"oublie": manga.oublier(req.get("serie", ""), req.get("original", ""))})
+                return self.send(200, manga.noter(req.get("serie", ""), req.get("original", ""), req.get("traduction", ""),
+                                                  req.get("note", "")))
+            except (ValueError, TypeError) as e:
+                return self.send(400, {"erreur": str(e)})
         if self.path.rstrip("/") != "/studio/api/jobs":
             return self.send(404, {"erreur": "inconnu"})
-        if n > 60 * 2**20:  # une image en base64 fait quelques Mo ; au-delà, on refuse au lieu de remplir la mémoire
-            return self.send(413, {"erreur": "requête trop grosse"})
+        # une image en base64 fait quelques Mo, un chapitre .cbz quelques dizaines ; au-delà on refuse
+        if n > 400 * 2**20:
+            return self.send(413, {"erreur": "requête trop grosse (400 Mo maximum) : envoie le manga chapitre par chapitre"})
         try:
             req = json.loads(self.rfile.read(n))
         except ValueError:
             return self.send(400, {"erreur": "json invalide"})
         kind = req.get("type")
-        if kind not in ("video", "video_image", "3d", "3d_texte", "video_longue", "image"):
+        if kind not in ("video", "video_image", "3d", "3d_texte", "video_longue", "image", "manga", "manga_page"):
             return self.send(400, {"erreur": "type inconnu"})
+        if kind == "manga" and not req.get("fichiers_b64"):
+            return self.send(400, {"erreur": "aucun fichier : envoie des images, un .cbz, un .zip ou un .pdf"})
+        if kind == "manga_page" and not (RE_JID.fullmatch(str(req.get("parent", ""))) and str(req.get("page", "")).isdigit()):
+            return self.send(400, {"erreur": "il faut le chapitre (parent) et le numéro de page"})
         if kind in ("video_image", "3d") and not req.get("image_b64"):
             return self.send(400, {"erreur": "image manquante"})
         scenes = [str(x)[:3000] for x in (req.get("scenes") or []) if str(x).strip()][:MAX_SCENES]
@@ -782,6 +946,12 @@ class H(BaseHTTPRequestHandler):
                          "qualite": req.get("qualite") if req.get("qualite") in QUALITES else "rapide",
                          "statut": "en attente", "etape": "en file d'attente",
                          "cree": time.time()}
+            if kind == "manga":
+                jobs[jid].update(fichiers_b64=[f for f in req["fichiers_b64"] if isinstance(f, dict)][:50],
+                                 serie=str(req.get("serie") or "Sans titre")[:80],
+                                 langue=req.get("langue") if req.get("langue") in manga.LANGUES else "auto")
+            if kind == "manga_page":
+                jobs[jid].update(parent=req["parent"], page=int(req["page"]), remarque=str(req.get("remarque", ""))[:500])
         save()
         todo.put(jid)
         self.send(200, {"id": jid, "position": todo.qsize()})

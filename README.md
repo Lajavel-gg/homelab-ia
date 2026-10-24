@@ -167,7 +167,7 @@ Puis dans Open WebUI, valves de l'outil Proxmox : `pool` = `agent` (les nouveaux
 
 À tester ensuite depuis le chat : « état du cluster », « arrête 110 » (doit être refusé), créer puis supprimer un conteneur de test. Si la création échoue sur les options `nesting`/`keyctl`, noter le message d'erreur exact.
 
-Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 9).
+Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 10).
 
 ### 4. Mémoire du Spark pleine « au bout d'un moment »
 
@@ -281,7 +281,41 @@ Puis dans **Open WebUI** (*Réglages admin*) — les variables du compose ne s'a
 
 **Revenir en arrière** à tout moment : `sudo spark/scripts/revenir-sans-llama-swap`, puis remettre dans Open WebUI les réglages d'avant (embeddings Ollama, modèle des tâches, API Ollama).
 
-### 9. À faire ensuite (moins urgent)
+### 9. Agent Manga (traduction japonais / anglais → français)
+
+Un modèle **Manga** dans Open WebUI : tu lui envoies des pages, ou un chapitre entier en `.cbz`, `.zip` ou `.pdf`, et il te les rend **traduites en français dans les bulles** (texte d'origine effacé, fond redessiné). Le travail technique est fait par [manga-image-translator](https://github.com/zyddnys/manga-image-translator) (conteneur `manga`) ; la traduction elle-même par **Flash-Next**, avec un **carnet par série** (noms des personnages, attaques, lieux) pour rester cohérent d'un chapitre à l'autre. Tout reste sur le Spark. Pour ton usage perso : pas pour repartager des scans.
+
+Ce qu'il sait faire, en parlant normalement :
+- « traduis ce chapitre de One Piece » + le `.cbz` → aperçu dans le chat, **Lire tout** (liseuse adaptée au téléphone) et le `.cbz` traduit à télécharger ;
+- « page 7, la bulle du haut c'est une blague » → il **refait la page** avec ta remarque, le `.cbz` est mis à jour ;
+- « appelle-le Sensei, pas Professeur » → il le **note dans le carnet** de la série ;
+- les chapitres apparaissent aussi dans la galerie `/studio` (filtre « Mangas »), et partent sur pve2 comme le reste si le ménage automatique est activé (section 7, désactivé par défaut).
+
+**Installation** (sur le Spark, depuis le dépôt) — idéalement avec llama-swap actif (section 8), qui fournit l'alias `manga` (Flash-Next sans phase de réflexion, beaucoup plus rapide) ; sans lui ça marche aussi, plus lentement :
+
+```bash
+sudo mkdir -p /opt/ai-stack/manga/series /opt/ai-stack/manga/travail
+sudo cp -r manga/. /opt/ai-stack/manga/                 # Dockerfile du conteneur
+sudo cp studio/manga.py studio/runner.py /opt/ai-stack/studio/ && sudo systemctl restart studio-runner
+sudo apt install poppler-utils                          # pour les PDF
+cd /opt/ai-stack && docker compose --profile manga build manga    # long la première fois (~20-30 min)
+docker compose --profile manga up -d manga && docker compose logs -f manga
+```
+
+Puis dans **Open WebUI** :
+1. *Espace de travail → Outils* : importer `openwebui/outils/manga_tool.py`.
+2. *Espace de travail → Modèles → Nouveau* : « Manga », basé sur Flash-Next, consignes système = contenu de `studio/consignes-manga.txt`, outil **Manga** seulement (pas de web, pas de code), filtre « Outils du modèle toujours actifs ».
+3. Essayer avec une seule page avant un chapitre entier. La **première** traduction télécharge les modèles de lecture et d'effacement (quelques minutes).
+
+**Bon à savoir**
+- Compter ~15 à 60 s par page. Les traductions passent dans la même file que les vidéos du Studio : pas de bataille pour la mémoire.
+- Les onomatopées dessinées dans le décor restent en général en japonais ; le texte manuscrit très stylisé est parfois mal lu ; sur les petites bulles, le texte est réduit pour tenir. Pour tout ça : « refais la page N ».
+- Une page qui plante reste en version originale dans le chapitre (signalé dans la liseuse) : demande de la refaire.
+- Limites : 400 Mo et 400 pages par envoi (un chapitre à la fois).
+- Le conteneur est construit pour ARM à partir de l'image PyTorch de NVIDIA. Un module Rust de manga-image-translator n'existe peut-être pas pour ARM : il ne sert qu'au détecteur « paddle », que l'on n'utilise pas, et il est désactivé automatiquement s'il manque.
+- Arrêter : `docker compose --profile manga stop manga` (le reste du homelab n'en dépend pas).
+
+### 10. À faire ensuite (moins urgent)
 
 - **Figer les versions** : `open-webui:main` est une version de développement, pas une version stable. Utiliser par exemple `ghcr.io/open-webui/open-webui:v0.12.3`, et des versions précises au lieu de `:latest` (Qdrant, SearXNG, Jupyter, Vaultwarden…) (les serveurs MCP de `mail/config.json` sont déjà figés dans cette branche).
 - **Remplacer du code maison par des outils existants** : Proxmox Backup Server pour les sauvegardes des machines ; Diun ou Renovate pour être prévenu des nouvelles versions ; options mémoire de ComfyUI (`--disable-smart-memory`) au lieu du timer qui le vide toutes les 5 min.

@@ -157,7 +157,7 @@ Puis dans Open WebUI, valves de l'outil Proxmox : `pool` = `agent` (les nouveaux
 
 À tester ensuite depuis le chat : « état du cluster », « arrête 110 » (doit être refusé), créer puis supprimer un conteneur de test. Si la création échoue sur les options `nesting`/`keyctl`, noter le message d'erreur exact.
 
-Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 7).
+Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 8).
 
 ### 4. Mémoire du Spark pleine « au bout d'un moment »
 
@@ -203,7 +203,11 @@ Pour la partie Proxmox (serveurs, machines, stockages, sauvegardes vzdump de la 
 
 Gmail ne fait pas toujours sonner le téléphone pour un message déposé de cette façon : il apparaît en haut de la réception, en gras, mais sans notification. Si tu veux une notification, on ajoutera ntfy plus tard.
 
-### 7. À faire ensuite (moins urgent)
+### 7. Studio : supprimer, garder, ménage automatique
+
+Sur la page `/studio`, chaque création a maintenant deux boutons : **Supprimer** et **☆ Garder**. Toutes les 6 h, le Studio supprime tout seul les créations de plus de **60 jours** qui ne sont pas marquées « gardée », ainsi que les fichiers bruts de ComfyUI qu'il a produits (`output/studio/`). Le reste de ComfyUI n'est jamais touché. Pour changer la durée : `Environment=STUDIO_GARDER_JOURS=90` dans `studio-runner.service` (`0` = jamais).
+
+### 8. À faire ensuite (moins urgent)
 
 - **Figer les versions** : `open-webui:main` est une version de développement, pas une version stable. Utiliser par exemple `ghcr.io/open-webui/open-webui:v0.12.3`, et des versions précises au lieu de `:latest` (Qdrant, SearXNG, Jupyter, Vaultwarden…) (les serveurs MCP de `mail/config.json` sont déjà figés dans cette branche).
 - **Remplacer du code maison par des outils existants** : llama-swap (charge/décharge les modèles à la demande, le chat ne « disparaît » plus pendant les vidéos) et suppression d'Ollama (llama-swap sert aussi bge-m3 et un petit modèle de tâches) ; Proxmox Backup Server pour les sauvegardes des machines ; Diun ou Renovate pour être prévenu des nouvelles versions ; options mémoire de ComfyUI (`--disable-smart-memory`) au lieu du timer qui le vide toutes les 5 min.
@@ -212,6 +216,12 @@ Gmail ne fait pas toujours sonner le téléphone pour un message déposé de cet
 - **Modèle des tâches** (titres, tags, requêtes de recherche) : un petit modèle (2-3 B) au lieu du 27 B, comme le conseille la doc d'Open WebUI.
 - **Chat mis en pause pendant les vidéos** : remplacer `systemctl stop/start` par le mode « router » de llama.cpp (`/models/unload`) ou llama-swap : le serveur reste joignable, plus d'erreur « Model not found ».
 - **Sauvegardes** : ajouter une copie hors de la maison (`restic copy`), sauvegarder Qdrant par son API de snapshots, et faire un test de restauration de temps en temps.
+
+## Tests automatiques
+
+À chaque push et chaque pull request, GitHub lance `.github/workflows/tests.yml` : erreurs Python (ruff), scripts shell (shellcheck), `docker-compose.yml`, fichiers JSON, et une quarantaine de tests (`tests/`) avec un faux serveur mail, un faux modèle, une fausse API Proxmox et une fausse page Studio. **Coche verte** sur GitHub = on peut déployer ; **croix rouge** = ne pas déployer, ouvrir le détail pour voir ce qui casse.
+
+En local : `pip install -r tests/requirements.txt && pytest -q`
 
 ## Licence
 

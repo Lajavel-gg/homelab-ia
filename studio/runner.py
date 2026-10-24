@@ -18,6 +18,7 @@ import json
 import os
 import queue
 import random
+import re
 import shutil
 import subprocess
 import threading
@@ -39,6 +40,10 @@ LLAMA_UNIT = "llama-flashnext"
 # Lecteur 3D servi en local (avant : CDN, donc pas de 3D sans internet). Copié dans MEDIA au démarrage,
 # car Caddy sert /studio/media sans mot de passe (l'iframe du chat ne peut pas en donner).
 VIEWER = "model-viewer-4.0.0.min.js"
+# Ménage automatique : les créations plus vieilles que ça sont supprimées (sauf celles marquées « garder »). 0 = jamais.
+GARDER_JOURS = int(os.environ.get("STUDIO_GARDER_JOURS", "60"))
+RE_JID = re.compile(r"[0-9a-f]{10}")
+RE_MEDIA = re.compile(r"/studio/media/([0-9a-f]{32}\.[a-z0-9]{2,4})")
 
 lock = threading.Lock()
 jobs: dict = {}
@@ -368,6 +373,93 @@ def worker():
                 update(jid, relance_chat="ok" if ok else "échec")
 
 
+# ---------------------------------------------------------------- ménage
+
+def fichiers_du_job(j):
+    """Fichiers de MEDIA qui appartiennent à une création (le rendu et l'aperçu), noms vérifiés."""
+    out = []
+    for cle in ("fichier", "apercu"):
+        m = RE_MEDIA.fullmatch(str(j.get(cle) or ""))
+        if m:
+            out.append(os.path.join(MEDIA, m.group(1)))
+    return out
+
+
+def supprimer_job(jid):
+    """« ok », « inconnu » ou « en cours » (on ne supprime pas une création qui tourne)."""
+    with lock:
+        j = jobs.get(jid)
+        if j is None:
+            return "inconnu"
+        if j.get("statut") in ("en attente", "en cours"):
+            return "en cours"
+        del jobs[jid]
+    for f in fichiers_du_job(j):
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+    save()
+    return "ok"
+
+
+def nettoyer(jours=None, maintenant=None):
+    """Supprime les créations de plus de `jours` jours non marquées « garder », les fichiers de MEDIA qui
+    n'appartiennent plus à aucune création, et les sorties brutes de ComfyUI du Studio du même âge.
+    Les rendus publiés sont des liens durs : effacer l'original de ComfyUI ne les touche pas.
+    Renvoie (créations supprimées, fichiers supprimés)."""
+    jours = GARDER_JOURS if jours is None else jours
+    if jours <= 0:
+        return 0, 0
+    limite = (maintenant or time.time()) - jours * 86400
+    with lock:
+        vieux = [k for k, j in jobs.items() if j.get("cree", 0) < limite and not j.get("garder")
+                 and j.get("statut") not in ("en attente", "en cours")]
+    n_jobs = sum(1 for k in vieux if supprimer_job(k) == "ok")
+    n_fichiers = 0
+    with lock:
+        utilises = {os.path.basename(f) for j in jobs.values() for f in fichiers_du_job(j)} | {VIEWER}
+    for nom in os.listdir(MEDIA) if os.path.isdir(MEDIA) else []:
+        chemin = os.path.join(MEDIA, nom)
+        if nom not in utilises and os.path.isfile(chemin) and os.path.getmtime(chemin) < limite:
+            os.remove(chemin)
+            n_fichiers += 1
+    racine = os.path.join(COMFY_OUT, "studio")  # uniquement ce que le Studio a produit, jamais le reste de ComfyUI
+    for dossier, sous, fichiers in os.walk(racine, topdown=False):
+        for nom in fichiers:
+            chemin = os.path.join(dossier, nom)
+            if os.path.getmtime(chemin) < limite:
+                os.remove(chemin)
+                n_fichiers += 1
+        if dossier != racine and not os.listdir(dossier):
+            os.rmdir(dossier)
+    return n_jobs, n_fichiers
+
+
+def menage():
+    while True:
+        try:
+            n_jobs, n_fichiers = nettoyer()
+            if n_jobs or n_fichiers:
+                log(f"ménage : {n_jobs} création(s) et {n_fichiers} fichier(s) de plus de {GARDER_JOURS} jours supprimés")
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+        time.sleep(6 * 3600)
+
+
+def place_utilisee():
+    total = 0
+    for racine in (MEDIA, os.path.join(COMFY_OUT, "studio")):
+        vus = set()
+        for dossier, _, fichiers in os.walk(racine):
+            for nom in fichiers:
+                st = os.stat(os.path.join(dossier, nom))
+                if st.st_ino not in vus:  # un lien dur n'est compté qu'une fois
+                    vus.add(st.st_ino)
+                    total += st.st_size
+    return total
+
+
 # ---------------------------------------------------------------- HTTP
 
 PAGE = """<!doctype html><html lang=fr><head><meta charset=utf-8>
@@ -376,18 +468,30 @@ PAGE = """<!doctype html><html lang=fr><head><meta charset=utf-8>
 <style>body{font-family:system-ui;background:#111;color:#eee;margin:0;padding:16px}
 .c{background:#1c1c1c;border-radius:12px;padding:12px;margin:0 0 16px;max-width:900px}
 video,model-viewer{width:100%;max-height:70vh;height:60vh;background:#000;border-radius:8px}
-small{color:#999}a{color:#8cf}</style></head><body><h1>🎬 Studio</h1><div id=l></div>
+small{color:#999}a{color:#8cf}.b{float:right}.b button{background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:8px;padding:4px 10px;margin-left:6px;cursor:pointer}
+.b button.s{color:#ff8a8a;border-color:#5a2a2a}#p{color:#999;font-size:13px;margin:-8px 0 16px}</style></head><body><h1>🎬 Studio</h1><div id=p></div><div id=l></div>
 <script>
 // Tout est échappé : prompt, étape et messages d'erreur peuvent contenir du texte venu du web.
 // La page est sur la même adresse qu'Open WebUI, une injection HTML pourrait y voler la session.
 const e=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const media=f=>/^\\/studio\\/media\\/[0-9a-f]{32}\\.[a-z0-9]{2,4}$/.test(f||'')?f:'';
-async function go(){const j=await (await fetch('api/jobs')).json();
+let avant='';
+async function go(){const r=await (await fetch('api/jobs')).text();
+// on ne redessine que si quelque chose a changé : sinon une vidéo en lecture repartait de zéro toutes les 10 s
+if(r===avant)return;avant=r;const j=JSON.parse(r);
 document.getElementById('l').innerHTML=Object.entries(j).reverse().map(([id,x])=>{
-let m='';const f=media(x.fichier);if(x.statut=='terminé'&&f){m=x.format=='image'?`<img src="${f}" style="max-width:100%;border-radius:8px">`:x.format=='glb'?`<model-viewer src="${f}" camera-controls auto-rotate shadow-intensity=1></model-viewer>`:`<video src="${f}" controls loop playsinline></video>`;
+if(!/^[0-9a-f]{10}$/.test(id))return'';
+let m='';const f=media(x.fichier);if(x.statut=='terminé'&&f){m=x.format=='image'?`<img src="${f}" style="max-width:100%;border-radius:8px">`:x.format=='glb'?`<model-viewer src="${f}" camera-controls auto-rotate shadow-intensity=1></model-viewer>`:`<video src="${f}" controls loop playsinline preload=metadata></video>`;
 m+=`<br><a href="${f}" download>⬇️ Télécharger</a>`}
-return `<div class=c><b>${e(x.type)}</b> — ${e(x.statut)}<br>${e(x.prompt)}<br><small>${e(x.etape)} · ${new Date(x.cree*1000).toLocaleString()}</small><br>${m}</div>`}).join('')}
-go();setInterval(go,10000)
+const fini=x.statut=='terminé'||x.statut=='échec';
+const b=fini?`<div class=b><button onclick="garde('${id}',${!x.garder})">${x.garder?'★ Gardée':'☆ Garder'}</button><button class=s onclick="sup('${id}')">Supprimer</button></div>`:'';
+return `<div class=c><b>${e(x.type)}</b> — ${e(x.statut)}${b}<br>${e(x.prompt)}<br><small>${e(x.etape)} · ${new Date(x.cree*1000).toLocaleString()}</small><br>${m}</div>`}).join('')}
+async function sup(id){if(!confirm('Supprimer définitivement cette création ?'))return;
+const r=await fetch('api/jobs/'+id,{method:'DELETE'});if(!r.ok)alert((await r.json()).erreur);avant='';go();place()}
+async function garde(id,v){await fetch('api/jobs/'+id+'/garder',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({garder:v})});avant='';go()}
+async function place(){const p=await (await fetch('api/place')).json();
+document.getElementById('p').textContent=(p.octets/2**30).toFixed(1).replace('.',',')+' Go utilisés'+(p.garder_jours>0?` · les créations de plus de ${p.garder_jours} jours sont supprimées automatiquement, sauf celles marquées ★`:'')}
+go();place();setInterval(go,10000)
 </script></body></html>"""
 
 
@@ -410,6 +514,8 @@ class H(BaseHTTPRequestHandler):
         if p == "/studio/api/jobs":
             with lock:
                 return self.send(200, {k: {x: y for x, y in v.items() if x != "image_b64"} for k, v in jobs.items()})
+        if p == "/studio/api/place":
+            return self.send(200, {"octets": place_utilisee(), "garder_jours": GARDER_JOURS})
         if p.startswith("/studio/api/jobs/"):
             jid = p.rsplit("/", 1)[1]
             with lock:
@@ -420,10 +526,31 @@ class H(BaseHTTPRequestHandler):
             return self.send(200 if j else 404, j or {"erreur": "inconnu"})
         self.send(404, {"erreur": "inconnu"})
 
+    def do_DELETE(self):
+        m = re.fullmatch(r"/studio/api/jobs/([0-9a-f]{10})", self.path.split("?")[0].rstrip("/"))
+        if not m:
+            return self.send(404, {"erreur": "inconnu"})
+        r = supprimer_job(m.group(1))
+        return self.send({"ok": 200, "inconnu": 404, "en cours": 409}[r],
+                         {"ok": True} if r == "ok" else {"erreur": "création inconnue" if r == "inconnu" else
+                                                          "création en cours : attends qu'elle finisse"})
+
     def do_POST(self):
+        n = int(self.headers.get("content-length", 0))
+        m = re.fullmatch(r"/studio/api/jobs/([0-9a-f]{10})/garder", self.path.split("?")[0].rstrip("/"))
+        if m:
+            try:
+                garder = bool(json.loads(self.rfile.read(min(n, 1000)) or b"{}").get("garder", True))
+            except ValueError:
+                return self.send(400, {"erreur": "json invalide"})
+            with lock:
+                if m.group(1) not in jobs:
+                    return self.send(404, {"erreur": "création inconnue"})
+                jobs[m.group(1)]["garder"] = garder
+            save()
+            return self.send(200, {"ok": True, "garder": garder})
         if self.path.rstrip("/") != "/studio/api/jobs":
             return self.send(404, {"erreur": "inconnu"})
-        n = int(self.headers.get("content-length", 0))
         if n > 60 * 2**20:  # une image en base64 fait quelques Mo ; au-delà, on refuse au lieu de remplir la mémoire
             return self.send(413, {"erreur": "requête trop grosse"})
         try:
@@ -467,6 +594,7 @@ def main():
         # Si le service a été coupé pendant une tâche, le chat est peut-être resté arrêté
         subprocess.run(["systemctl", "start", "--no-block", LLAMA_UNIT], check=False)
     threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=menage, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", 8190), H).serve_forever()
 
 

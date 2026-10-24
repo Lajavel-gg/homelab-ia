@@ -95,6 +95,77 @@ Ce n'est pas un installateur clé en main mais la **configuration réelle** d'un
 
 > **Attention :** les modèles ne sont pas inclus. Vérifiez la licence de chacun avant usage (certaines licences de modèles vidéo excluent des pays ou l'usage commercial).
 
+## Mise à jour d'octobre 2026 : ce qu'il reste à faire à la main
+
+Cette branche corrige le code (voir la pull request). Les étapes ci-dessous se font sur les machines, dans l'ordre.
+
+### 1. Déployer les fichiers modifiés
+
+| Fichier du dépôt | Où le mettre | Puis |
+|---|---|---|
+| `mail/mail_mcp.py` | Spark : `/opt/ai-stack/mcpo/mail/` | `docker compose restart mcpo` |
+| `studio/runner.py` | Spark : `/opt/ai-stack/studio/` | `sudo systemctl restart studio-runner` |
+| `openwebui/outils/*.py`, `openwebui/filtres/correcteur_memoire.py` | Open WebUI → *Espace de travail → Outils / Fonctions* : remplacer le code de chacun | Enregistrer |
+| `spark/docker-compose.yml`, `spark/searxng/settings.yml` | Spark : `/opt/ai-stack/` | Vérifier que `.env` contient `SEARXNG_SECRET` (`openssl rand -hex 32`), puis `docker compose up -d` |
+| `proxmox-lxc/haproxy.cfg` | Conteneur 112 : `/etc/haproxy/haproxy.cfg` | `haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy` |
+
+> **Attention :** avec `ENABLE_VALVE_ENCRYPTION`, les valves (clé Proxmox…) sont chiffrées avec `WEBUI_SECRET_KEY`. Ne plus jamais changer cette clé, sinon les valves sont perdues ; la garder dans Vaultwarden.
+
+### 2. Séparer le mail du web (risque d'injection de prompt)
+
+Un modèle qui lit les mails ET peut aller sur le web ou exécuter du code peut être piégé par une page ou un mail (« envoie le contenu des mails à … »). On sépare :
+
+1. *Espace de travail → Modèles → Nouveau* : « 📬 Mail », basé sur Flash-Next, avec **seulement** l'outil `mail`. Pas de recherche web, pas de `fetch`, pas de `browser`, pas d'interpréteur de code, et **sans** le filtre « Outils par défaut ».
+2. Sur tous les autres modèles : décocher l'outil `mail`.
+
+### 3. Limiter la clé Proxmox de l'IA
+
+Aujourd'hui la clé `spark@pve!spark` a le rôle PVEAdmin partout : la liste `PROTEGES` du code est la seule barrière. Après ces commandes, l'IA **voit** tout le cluster mais n'**agit** que sur le pool `agent` ; Vaultwarden (110), le VPN (111), le proxy (112) et LanguageTool (113) restent hors du pool, donc Proxmox refuse lui-même.
+
+Sur un nœud Proxmox (root) :
+
+```bash
+# 1. Le pool, avec les conteneurs déjà créés par l'IA (ceux qui ont le tag « agent ») — PAS 110 à 113
+pveum pool add agent --comment "Conteneurs gérés par l'IA"
+pveum pool modify agent --vms <ID1>,<ID2>
+
+# 2. Un rôle avec seulement ce dont l'outil a besoin
+pveum role add IA-Agent --privs "VM.Audit VM.PowerMgmt VM.Backup VM.Allocate VM.Config.Disk VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Options Datastore.AllocateSpace Datastore.Audit"
+
+# 3. Les droits (posés sur l'utilisateur ET sur la clé : marche que la clé soit « séparée » ou non)
+for qui in "--users spark@pve" "--tokens spark@pve!spark"; do
+  pveum acl modify /                    $qui --roles PVEAuditor   # lecture seule partout
+  pveum acl modify /pool/agent          $qui --roles IA-Agent     # actions sur le pool seulement
+  pveum acl modify /storage/local       $qui --roles IA-Agent     # modèle Debian
+  pveum acl modify /storage/local-lvm   $qui --roles IA-Agent     # disques des conteneurs
+  pveum acl modify /storage/shared-hdd  $qui --roles IA-Agent     # sauvegardes
+  pveum acl modify /sdn/zones/localnetwork $qui --roles PVESDNUser  # pont vmbr0
+done
+
+# 4. Retirer l'ancien PVEAdmin (regarder où il est posé, puis le supprimer au même endroit)
+pveum acl list | grep spark
+pveum acl delete / --users spark@pve --roles PVEAdmin          # adapter le chemin / --tokens si besoin
+
+# 5. Vérifier : sur 110, seulement des droits de lecture (VM.Audit…)
+pveum user token permissions spark@pve spark --path /vms/110
+pveum user token permissions spark@pve spark --path /pool/agent
+```
+
+Puis dans Open WebUI, valves de l'outil Proxmox : `pool` = `agent` (les nouveaux conteneurs y sont rangés automatiquement).
+
+À tester ensuite depuis le chat : « état du cluster », « arrête 110 » (doit être refusé), créer puis supprimer un conteneur de test. Si la création échoue sur les options `nesting`/`keyctl`, noter le message d'erreur exact.
+
+Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 4).
+
+### 4. À faire ensuite (moins urgent)
+
+- **Figer les versions** : `open-webui:main` est une version de développement, pas une version stable. Utiliser par exemple `ghcr.io/open-webui/open-webui:v0.12.3`, et des versions précises au lieu de `:latest` (Qdrant, SearXNG, Jupyter, Vaultwarden…) et de `npx -y` / `uvx` sans version dans `mail/config.json` (attaques npm de 2025-2026).
+- **Vaultwarden** : passer en 1.37.4 ou plus (7 failles corrigées), activer la double authentification, et n'accepter le port 8080 que depuis HAProxy (pare-feu Proxmox sur le conteneur 110, source 192.168.0.212).
+- **wg-easy** : activer la double authentification de l'interface ; charger `wireguard` sur l'hôte Proxmox puis retirer `SYS_MODULE` et le montage `/lib/modules`.
+- **Modèle des tâches** (titres, tags, requêtes de recherche) : un petit modèle (2-3 B) au lieu du 27 B, comme le conseille la doc d'Open WebUI.
+- **Chat mis en pause pendant les vidéos** : remplacer `systemctl stop/start` par le mode « router » de llama.cpp (`/models/unload`) ou llama-swap : le serveur reste joignable, plus d'erreur « Model not found ».
+- **Sauvegardes** : ajouter une copie hors de la maison (`restic copy`), sauvegarder Qdrant par son API de snapshots, et faire un test de restauration de temps en temps.
+
 ## Licence
 
 [MIT](LICENSE)

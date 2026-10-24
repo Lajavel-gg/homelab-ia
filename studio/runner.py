@@ -476,7 +476,7 @@ small{color:#999}a{color:#8cf}.b{float:right}.b button{background:#2a2a2a;color:
 const e=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const media=f=>/^\\/studio\\/media\\/[0-9a-f]{32}\\.[a-z0-9]{2,4}$/.test(f||'')?f:'';
 let avant='';
-async function go(){const r=await (await fetch('api/jobs')).text();
+async function go(){const r=await (await fetch('/studio/api/jobs')).text();
 // on ne redessine que si quelque chose a changé : sinon une vidéo en lecture repartait de zéro toutes les 10 s
 if(r===avant)return;avant=r;const j=JSON.parse(r);
 document.getElementById('l').innerHTML=Object.entries(j).reverse().map(([id,x])=>{
@@ -487,9 +487,9 @@ const fini=x.statut=='terminé'||x.statut=='échec';
 const b=fini?`<div class=b><button onclick="garde('${id}',${!x.garder})">${x.garder?'★ Gardée':'☆ Garder'}</button><button class=s onclick="sup('${id}')">Supprimer</button></div>`:'';
 return `<div class=c><b>${e(x.type)}</b> — ${e(x.statut)}${b}<br>${e(x.prompt)}<br><small>${e(x.etape)} · ${new Date(x.cree*1000).toLocaleString()}</small><br>${m}</div>`}).join('')}
 async function sup(id){if(!confirm('Supprimer définitivement cette création ?'))return;
-const r=await fetch('api/jobs/'+id,{method:'DELETE'});if(!r.ok)alert((await r.json()).erreur);avant='';go();place()}
-async function garde(id,v){await fetch('api/jobs/'+id+'/garder',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({garder:v})});avant='';go()}
-async function place(){const p=await (await fetch('api/place')).json();
+const r=await fetch('/studio/api/jobs/'+id,{method:'DELETE'});if(!r.ok)alert((await r.json()).erreur);avant='';go();place()}
+async function garde(id,v){await fetch('/studio/api/jobs/'+id+'/garder',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({garder:v})});avant='';go()}
+async function place(){const p=await (await fetch('/studio/api/place')).json();
 document.getElementById('p').textContent=(p.octets/2**30).toFixed(1).replace('.',',')+' Go utilisés'+(p.garder_jours>0?` · les créations de plus de ${p.garder_jours} jours sont supprimées automatiquement, sauf celles marquées ★`:'')}
 go();place();setInterval(go,10000)
 </script></body></html>"""

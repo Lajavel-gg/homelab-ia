@@ -137,3 +137,9 @@ setTimeout(()=>{console.log(JSON.stringify({html,p}))},100);""")
     assert "alert(1);(" not in out["html"]  # identifiant piégé ignoré
     assert "0123456789abcdef0123456789abcdef.mp4" in out["html"] and "Supprimer" in out["html"]
     assert "1,0 Go" in out["p"]
+
+
+def test_page_chemins_absolus():
+    # en relatif, la page ouverte sur « /studio » (sans / final) cherchait /api/jobs et restait vide
+    js = page_js()
+    assert "fetch('api/" not in js and js.count("fetch('/studio/api/") >= 3

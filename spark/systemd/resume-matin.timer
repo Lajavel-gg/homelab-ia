@@ -1,0 +1,9 @@
+[Unit]
+Description=Résumé du matin, prêt pour 7 h tous les jours
+
+[Timer]
+OnCalendar=*-*-* 06:50:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

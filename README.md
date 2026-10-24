@@ -157,7 +157,7 @@ Puis dans Open WebUI, valves de l'outil Proxmox : `pool` = `agent` (les nouveaux
 
 À tester ensuite depuis le chat : « état du cluster », « arrête 110 » (doit être refusé), créer puis supprimer un conteneur de test. Si la création échoue sur les options `nesting`/`keyctl`, noter le message d'erreur exact.
 
-Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 6).
+Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 7).
 
 ### 4. Mémoire du Spark pleine « au bout d'un moment »
 
@@ -181,7 +181,29 @@ Tout est réglé en mode « rapide et léger », comme pour une petite carte gra
 - **Vidéo** : résolution native de MiniMax H3 = 1344×768 ; la qualité par défaut « rapide » est en 864×480. Passer « bonne » par défaut, et 25 étapes pour « meilleure » (conseil de la doc ComfyUI).
 - Méthode : comparer d'abord dans l'interface ComfyUI (port 8443) avec les modèles officiels, puis ajouter un mode « qualité max » au Studio.
 
-### 6. À faire ensuite (moins urgent)
+### 6. Nouveau : le résumé du matin
+
+Tous les jours vers 6 h 50, le Spark lit les mails non lus de la nuit, demande à Flash-Next lesquels sont importants, vérifie le homelab (services, sauvegarde, disque, mémoire, Proxmox) et **dépose** le résumé dans ta boîte de réception, non lu, avec le libellé « Résumés du matin ». Rien n'est envoyé : le message est rangé comme un brouillon. Le modèle n'a aucun outil, donc un mail piégé ne peut rien faire (au pire, fausser le résumé).
+
+```bash
+sudo mkdir -p /opt/ai-stack/resume
+sudo cp resume/resume_matin.py /opt/ai-stack/resume/
+sudo cp resume/resume.env.example /opt/ai-stack/resume/resume.env   # obligatoire, même sans rien changer
+sudo cp spark/systemd/resume-matin.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# Essai sans rien déposer : écrit resume-test.html dans le dossier courant
+sudo MAIL_CONF=/opt/ai-stack/mcpo/mail/mail.env python3 /opt/ai-stack/resume/resume_matin.py --test
+# Essai en vrai, puis activation tous les jours
+sudo systemctl start resume-matin && journalctl -u resume-matin -n 20
+sudo systemctl enable --now resume-matin.timer
+```
+
+Pour voir l'état de Proxmox dans le résumé, remplir les lignes `PVE_*` de `resume.env` (une clé en lecture seule suffit) et copier le certificat `pve-root-ca.pem` dans `/opt/ai-stack/resume/`.
+
+Gmail ne fait pas toujours sonner le téléphone pour un message déposé de cette façon : il apparaît en haut de la réception, en gras, mais sans notification. Si tu veux une notification, on ajoutera ntfy plus tard.
+
+### 7. À faire ensuite (moins urgent)
 
 - **Figer les versions** : `open-webui:main` est une version de développement, pas une version stable. Utiliser par exemple `ghcr.io/open-webui/open-webui:v0.12.3`, et des versions précises au lieu de `:latest` (Qdrant, SearXNG, Jupyter, Vaultwarden…) (les serveurs MCP de `mail/config.json` sont déjà figés dans cette branche).
 - **Remplacer du code maison par des outils existants** : llama-swap (charge/décharge les modèles à la demande, le chat ne « disparaît » plus pendant les vidéos) et suppression d'Ollama (llama-swap sert aussi bge-m3 et un petit modèle de tâches) ; Proxmox Backup Server pour les sauvegardes des machines ; Diun ou Renovate pour être prévenu des nouvelles versions ; options mémoire de ComfyUI (`--disable-smart-memory`) au lieu du timer qui le vide toutes les 5 min.

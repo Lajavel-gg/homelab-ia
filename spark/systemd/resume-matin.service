@@ -1,0 +1,18 @@
+[Unit]
+Description=Résumé du matin : mails importants + état du homelab, déposé dans la boîte mail
+Wants=network-online.target
+After=network-online.target llama-flashnext.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/ai-stack/resume/resume_matin.py
+# Utilisateur jetable, lecture seule partout : le script ne fait que lire et parler au serveur mail / au chat
+DynamicUser=yes
+LoadCredential=mail.env:/opt/ai-stack/mcpo/mail/mail.env
+LoadCredential=resume.env:/opt/ai-stack/resume/resume.env
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# Le chat peut être en pause (vidéo) ou endormi : on lui laisse le temps de revenir
+TimeoutStartSec=40min

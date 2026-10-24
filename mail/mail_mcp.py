@@ -7,6 +7,7 @@ Droits volontairement limités (aucune fonction d'envoi ni de suppression n'exis
 Configuration : /app/mail/mail.env (MAIL_IMAP_HOST, MAIL_IMAP_PORT, MAIL_USER, MAIL_PASSWORD, MAIL_SSL).
 """
 
+import base64
 import email
 import email.utils
 import html
@@ -88,8 +89,40 @@ def _dec(v) -> str:
         return str(v)
 
 
+def _utf7_encode(nom: str) -> str:
+    """Nom de dossier → « UTF-7 modifié » (RFC 3501), obligatoire en IMAP dès qu'il y a un accent.
+    « Résumés » → « R&AOk-sum&AOk-s ». Sans ça, imaplib plante (il n'envoie que de l'ASCII)."""
+    out, tampon = [], []
+
+    def vider():
+        if tampon:
+            b64 = base64.b64encode("".join(tampon).encode("utf-16-be")).decode().rstrip("=").replace("/", ",")
+            out.append("&" + b64 + "-")
+            tampon.clear()
+
+    for c in nom:
+        if 0x20 <= ord(c) <= 0x7E:
+            vider()
+            out.append("&-" if c == "&" else c)
+        else:
+            tampon.append(c)
+    vider()
+    return "".join(out)
+
+
+def _utf7_decode(nom: str) -> str:
+    """Inverse de _utf7_encode, pour afficher les noms de dossiers renvoyés par le serveur."""
+    def remplacer(m):
+        s = m.group(1)
+        if not s:
+            return "&"
+        s = s.replace(",", "/")
+        return base64.b64decode(s + "=" * (-len(s) % 4)).decode("utf-16-be", errors="replace")
+    return re.sub(r"&([A-Za-z0-9+,]*)-", remplacer, nom)
+
+
 def _q(folder: str) -> str:
-    return '"' + folder.replace('"', '\\"') + '"'
+    return '"' + _utf7_encode(folder).replace('"', '\\"') + '"'
 
 
 def _special(m, flag: str, fallbacks: list[str]) -> str:
@@ -100,7 +133,7 @@ def _special(m, flag: str, fallbacks: list[str]) -> str:
         mo = re.match(r'\((?P<flags>[^)]*)\) "(?P<sep>[^"]*)" (?P<name>.+)$', line)
         if not mo:
             continue
-        name = mo.group("name").strip().strip('"')
+        name = _utf7_decode(mo.group("name").strip().strip('"'))
         names.append(name)
         if flag.lower() in mo.group("flags").lower():
             return name
@@ -224,7 +257,8 @@ def rechercher_mails(requete: str, partout: bool = False, maximum: int = 20) -> 
                 dossier = (_special(m, "\\All", ["[Gmail]/All Mail", "[Gmail]/Tous les messages"]) if gmail else None) or "INBOX"
             m.select(_q(dossier), readonly=True)
             if gmail:
-                typ, data = m.uid("SEARCH", "CHARSET", "UTF-8", "X-GM-RAW", '"' + requete.replace('"', "") + '"')
+                m.literal = requete.encode()  # en littéral : les accents passent (une chaîne ASCII plantait)
+                typ, data = m.uid("SEARCH", "CHARSET", "UTF-8", "X-GM-RAW")
             else:
                 m.literal = requete.encode()
                 typ, data = m.uid("SEARCH", "CHARSET", "UTF-8", "TEXT")
@@ -249,7 +283,7 @@ def lister_dossiers() -> str:
                 line = raw.decode(errors="replace")
                 mo = re.match(r'\((?P<flags>[^)]*)\) "(?P<sep>[^"]*)" (?P<name>.+)$', line)
                 if mo:
-                    noms.append(mo.group("name").strip().strip('"'))
+                    noms.append(_utf7_decode(mo.group("name").strip().strip('"')))
             return "Dossiers : " + ", ".join(noms)
     except Exception as e:
         return _erreur(e)
@@ -306,7 +340,7 @@ def ranger(uids: str, libelle: str, dossier: str = "INBOX") -> str:
                 for u in liste:
                     typ, data = m.uid("FETCH", u, "(X-GM-LABELS)")
                     txt = b" ".join(d if isinstance(d, bytes) else d[0] for d in data if d).decode(errors="replace")
-                    if libelle.lower() not in txt.lower():
+                    if _utf7_encode(libelle).lower() not in txt.lower() and libelle.lower() not in txt.lower():
                         echecs.append(u)
             else:
                 for u in liste:

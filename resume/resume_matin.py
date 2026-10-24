@@ -18,6 +18,7 @@ Avec systemd, les deux arrivent par LoadCredential dans $CREDENTIALS_DIRECTORY.
   resume_matin.py --test    fait le résumé et l'écrit dans resume-test.html, sans rien déposer
 """
 
+import base64
 import email
 import email.utils
 import html
@@ -122,6 +123,38 @@ def _texte(msg) -> str:
         txt = re.sub(r"(?is)<(script|style).*?</\1>", " ", txt)
         txt = html.unescape(re.sub(r"<[^>]+>", " ", txt))
     return re.sub(r"\s+", " ", txt).strip()
+
+
+def _utf7_encode(nom: str) -> str:
+    """Nom de dossier → « UTF-7 modifié » (RFC 3501), obligatoire en IMAP dès qu'il y a un accent.
+    « Résumés » → « R&AOk-sum&AOk-s ». Sans ça, imaplib plante (il n'envoie que de l'ASCII)."""
+    out, tampon = [], []
+
+    def vider():
+        if tampon:
+            b64 = base64.b64encode("".join(tampon).encode("utf-16-be")).decode().rstrip("=").replace("/", ",")
+            out.append("&" + b64 + "-")
+            tampon.clear()
+
+    for c in nom:
+        if 0x20 <= ord(c) <= 0x7E:
+            vider()
+            out.append("&-" if c == "&" else c)
+        else:
+            tampon.append(c)
+    vider()
+    return "".join(out)
+
+
+def _utf7_decode(nom: str) -> str:
+    """Inverse de _utf7_encode, pour afficher les noms de dossiers renvoyés par le serveur."""
+    def remplacer(m):
+        s = m.group(1)
+        if not s:
+            return "&"
+        s = s.replace(",", "/")
+        return base64.b64decode(s + "=" * (-len(s) % 4)).decode("utf-16-be", errors="replace")
+    return re.sub(r"&([A-Za-z0-9+,]*)-", remplacer, nom)
 
 
 def connexion(conf):
@@ -724,7 +757,8 @@ def construire(mails, tri, etat, conf, hist=None):
 
 def deposer(m, msg, libelle):
     """Range le résumé dans la réception (non lu) et sous le libellé, sans l'envoyer."""
-    m.create('"' + libelle.replace('"', "") + '"')  # sans effet s'il existe déjà
+    dossier = '"' + _utf7_encode(libelle.replace('"', "")) + '"'  # « Résumés » a des accents : encodage IMAP
+    m.create(dossier)  # sans effet s'il existe déjà
     typ, _ = m.append("INBOX", "", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
     if typ != "OK":
         raise RuntimeError("le serveur a refusé le dépôt du résumé")
@@ -736,9 +770,9 @@ def deposer(m, msg, libelle):
         typ, data = m.uid("SEARCH", "HEADER", "Message-ID", mid)
     for uid in (data[0] or b"").split():
         if est_gmail(m):
-            m.uid("STORE", uid, "+X-GM-LABELS", '("' + libelle.replace('"', "") + '")')
+            m.uid("STORE", uid, "+X-GM-LABELS", "(" + dossier + ")")
         else:
-            m.uid("COPY", uid, '"' + libelle.replace('"', "") + '"')
+            m.uid("COPY", uid, dossier)
 
 
 def main():

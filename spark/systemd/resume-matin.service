@@ -16,3 +16,5 @@ PrivateTmp=yes
 NoNewPrivileges=yes
 # Le chat peut être en pause (vidéo) ou endormi : on lui laisse le temps de revenir
 TimeoutStartSec=40min
+# Historique pour le graphique des 7 jours : /var/lib/resume-matin
+StateDirectory=resume-matin

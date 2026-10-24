@@ -183,7 +183,7 @@ Tout est réglé en mode « rapide et léger », comme pour une petite carte gra
 
 ### 6. Nouveau : le résumé du matin
 
-Tous les jours vers 6 h 50, le Spark lit les mails non lus de la nuit, demande à Flash-Next lesquels sont importants, vérifie le homelab (services, sauvegarde, disque, mémoire, Proxmox) et **dépose** le résumé dans ta boîte de réception, non lu, avec le libellé « Résumés du matin ». Rien n'est envoyé : le message est rangé comme un brouillon. Le modèle n'a aucun outil, donc un mail piégé ne peut rien faire (au pire, fausser le résumé).
+Tous les jours vers 6 h 50, le Spark lit les mails non lus de la nuit, demande à Flash-Next lesquels sont importants, vérifie le homelab (services, sauvegarde, disque, mémoire, Proxmox) et **dépose** un résumé mis en page (chiffres clés, mails classés par catégorie, graphique des 7 derniers jours, jauges) le résumé dans ta boîte de réception, non lu, avec le libellé « Résumés du matin ». Rien n'est envoyé : le message est rangé comme un brouillon. Le modèle n'a aucun outil, donc un mail piégé ne peut rien faire (au pire, fausser le résumé).
 
 ```bash
 sudo mkdir -p /opt/ai-stack/resume

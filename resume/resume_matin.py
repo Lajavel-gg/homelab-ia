@@ -42,6 +42,8 @@ RESUME_CONF = os.environ.get("RESUME_CONF") or (os.path.join(CREDS, "resume.env"
 LLAMA = os.environ.get("LLAMA_URL", "http://127.0.0.1:8090")
 STUDIO = os.environ.get("STUDIO_URL", "http://127.0.0.1:8190/studio/api/jobs")
 ETAT_SAUVEGARDE = os.environ.get("ETAT_SAUVEGARDE", "/var/lib/sauvegarde-spark/etat.json")
+# STATE_DIRECTORY est fourni par systemd (StateDirectory=resume-matin)
+HISTORIQUE = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/resume-matin"), "historique.json")
 MAX_MAILS = 60
 JOURS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre",
@@ -172,8 +174,10 @@ impôts, administration, santé, rendez-vous, facture à payer, livraison du jou
 mot de passe, code). PAS important : publicités, promotions, newsletters, réseaux sociaux, notifications banales.
 
 Réponds UNIQUEMENT par ce JSON (6 mails importants maximum, du plus urgent au moins urgent) :
-{"importants": [{"n": numéro du mail, "titre": "2 à 5 mots", "resume": "une phrase simple en français"}],
- "phrase": "une phrase d'ensemble, simple et sympa, pour commencer la journée"}
+{"importants": [{"n": numéro du mail, "titre": "2 à 5 mots", "resume": "une phrase simple en français",
+                 "categorie": "Banque" | "Santé" | "Livraison" | "Administration" | "Personnel" | "Travail" | "Sécurité" | "Autre",
+                 "urgent": true si c'est à faire aujourd'hui (payer, répondre, se présenter, réagir à une alerte), sinon false}],
+ "phrase": "une phrase d'ensemble, simple et directe, pour commencer la journée (pas d'émoji)"}
 
 MAILS :
 """
@@ -193,7 +197,8 @@ def llama_pret(attente_max=1200):
 
 
 def trier(mails):
-    """Renvoie (importants, phrase) ; importants = liste de (mail, titre, résumé). None si le modèle ne répond pas."""
+    """Renvoie (importants, phrase) ; importants = liste de dict (mail, titre, resume, categorie, urgent).
+    None si le modèle ne répond pas."""
     if not mails:
         return [], "Aucun nouveau mail cette nuit."
     if not llama_pret():
@@ -221,15 +226,24 @@ def trier(mails):
             continue
         if 1 <= n <= len(mails) and n not in vus:  # expéditeur et sujet viennent du vrai mail, pas du modèle
             vus.add(n)
-            importants.append((mails[n - 1], str(x.get("titre") or "")[:60], str(x.get("resume") or "")[:300]))
+            cat = str(x.get("categorie") or "Autre")
+            importants.append({"mail": mails[n - 1], "titre": str(x.get("titre") or "")[:60],
+                               "resume": str(x.get("resume") or "")[:300],
+                               "categorie": cat if cat in CATEGORIES else "Autre", "urgent": x.get("urgent") is True})
+    importants.sort(key=lambda i: not i["urgent"])  # urgents d'abord, ordre du modèle ensuite
     return importants[:6], str(rep.get("phrase") or "")[:300]
+
+
+CATEGORIES = ("Banque", "Santé", "Livraison", "Administration", "Personnel", "Travail", "Sécurité", "Autre")
 
 
 # ------------------------------------------------------------------ état du homelab
 
+
 def etat_homelab(conf):
-    """Liste de (nom, ok, détail) ; ok = True, False ou None (inconnu / pas grave)."""
-    lignes = []
+    """{"services": [(nom, ok, détail)], "sauvegarde": (ok, détail court, heure), "jauges": [(nom, %, détail)],
+    "serveurs": [(nom, ok, détail)]} ; ok = True, False ou None (pas grave / inconnu)."""
+    services, jauges = [], []
     video = False
     try:
         jobs = http_json(STUDIO, timeout=5)
@@ -237,32 +251,35 @@ def etat_homelab(conf):
     except Exception:  # noqa: BLE001
         pass
     for nom, unite in SERVICES:
-        r = subprocess.run(["systemctl", "is-active", unite], capture_output=True, text=True).stdout.strip()
+        try:
+            r = subprocess.run(["systemctl", "is-active", unite], capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            continue
         if r == "active":
-            lignes.append((nom, True, "en marche"))
+            services.append((nom, True, "en marche"))
         elif unite == "llama-flashnext" and video:
-            lignes.append((nom, None, "en pause : une vidéo est en cours"))
+            services.append((nom, None, "en pause (vidéo en cours)"))
         elif r in ("inactive", "failed", "activating", "deactivating"):
-            lignes.append((nom, False, {"failed": "en panne", "inactive": "arrêté"}.get(r, r)))
+            services.append((nom, False, {"failed": "en panne", "inactive": "arrêté"}.get(r, r)))
         # unité inconnue (pas installée) : on n'affiche rien
     for nom, url in PAGES:
         try:
             urllib.request.urlopen(url, timeout=5).close()
-            lignes.append((nom, True, "répond"))
+            services.append((nom, True, "répond"))
         except Exception:  # noqa: BLE001
-            lignes.append((nom, False, "ne répond pas"))
+            services.append((nom, False, "ne répond pas"))
 
     try:
         with open(ETAT_SAUVEGARDE) as f:
             s = json.load(f)
         quand = datetime.fromisoformat(s["date"]).astimezone().replace(tzinfo=None)
         vieille = datetime.now() - quand > timedelta(hours=30)
-        detail = f"{s.get('message', '')} — {quand:%d/%m à %H:%M}" + (" (TROP ANCIENNE)" if vieille else "")
-        lignes.append(("Sauvegarde de la nuit", bool(s.get("ok")) and not vieille, detail))
+        sauvegarde = (bool(s.get("ok")) and not vieille,
+                      "trop ancienne" if vieille else ("réussie" if s.get("ok") else "échec"), f"{quand:%d/%m · %H:%M}")
     except FileNotFoundError:
-        lignes.append(("Sauvegarde de la nuit", False, "aucun état trouvé"))
-    except Exception as e:  # noqa: BLE001
-        lignes.append(("Sauvegarde de la nuit", None, f"état illisible ({e})"))
+        sauvegarde = (False, "aucun état", "—")
+    except Exception:  # noqa: BLE001
+        sauvegarde = (None, "état illisible", "—")
 
     vus = set()
     for chemin in ("/", "/opt"):
@@ -272,104 +289,272 @@ def etat_homelab(conf):
                 continue
             vus.add(dev)
             u = shutil.disk_usage(chemin)
-            pc = round(u.used * 100 / u.total)
-            lignes.append((f"Disque {chemin}", pc < 90, f"{pc} % utilisé, {u.free // 2**30} Go libres"))
+            jauges.append(("Disque système" if chemin == "/" else f"Disque {chemin}", round(u.used * 100 / u.total), f"{taille(u.free)} libres sur {taille(u.total)}"))
         except OSError:
             pass
     try:
         mem = dict(l.split(":", 1) for l in open("/proc/meminfo"))
-        total, dispo = int(mem["MemTotal"].split()[0]) // 2**20, int(mem["MemAvailable"].split()[0]) // 2**20
-        lignes.append(("Mémoire du Spark", None, f"{dispo} Go libres sur {total}"))
+        total, dispo = int(mem["MemTotal"].split()[0]) * 1024, int(mem["MemAvailable"].split()[0]) * 1024
+        jauges.append(("Mémoire du Spark", round((total - dispo) * 100 / total), f"{taille(dispo)} libres sur {taille(total)}"))
     except Exception:  # noqa: BLE001
         pass
 
-    lignes += etat_proxmox(conf)
-    return lignes
+    serveurs, j2 = etat_proxmox(conf)
+    return {"services": services, "sauvegarde": sauvegarde, "jauges": jauges + j2, "serveurs": serveurs}
+
+
+def taille(octets):
+    go = octets / 2**30
+    return f"{go / 1024:.1f} To".replace(".", ",") if go >= 1000 else f"{go:.0f} Go"
 
 
 def etat_proxmox(conf):
     if not (conf.get("PVE_HOST") and conf.get("PVE_TOKEN_ID") and conf.get("PVE_TOKEN_SECRET")):
-        return []
+        return [], []
     ca = conf.get("PVE_CA", "")
     ctx = ssl.create_default_context(cafile=ca) if ca and os.path.exists(ca) else ssl._create_unverified_context()
-    if ca:
-        ctx.check_hostname = False  # certificat du cluster émis pour un nom, on parle à l'IP
+    ctx.check_hostname = False  # certificat du cluster émis pour un nom, on parle à l'IP
     try:
         res = http_json(f"https://{conf['PVE_HOST']}:8006/api2/json/cluster/resources", timeout=15, ctx=ctx,
                         headers={"Authorization": f"PVEAPIToken={conf['PVE_TOKEN_ID']}={conf['PVE_TOKEN_SECRET']}"})["data"]
-    except Exception as e:  # noqa: BLE001
-        return [("Proxmox", False, f"injoignable ({str(e)[:80]})")]
-    lignes = []
+    except Exception:  # noqa: BLE001
+        return [("Proxmox", False, "injoignable")], []
+    serveurs, jauges = [], []
     for n in sorted((r for r in res if r["type"] == "node"), key=lambda r: r["node"]):
-        en_ligne = n.get("status") == "online"
-        detail = (f"en ligne, mémoire {round(n.get('mem', 0) / max(n.get('maxmem', 1), 1) * 100)} %" if en_ligne
-                  else "HORS LIGNE")
-        lignes.append((f"Serveur {n['node']}", en_ligne, detail))
-    invites = [r for r in res if r["type"] in ("qemu", "lxc")]
-    arretes = [f"{r['vmid']} {r.get('name', '')}" for r in invites if r.get("status") != "running" and not r.get("template")]
-    lignes.append(("VM et conteneurs", None if arretes else True,
-                   f"{len(invites) - len(arretes)}/{len(invites)} allumés" + (f" — arrêtés : {', '.join(arretes[:8])}" if arretes else "")))
-    return lignes
+        if n.get("status") == "online":
+            serveurs.append((f"Serveur {n['node']}", True, "en ligne"))
+            jauges.append((f"Mémoire {n['node']}", round(n.get("mem", 0) * 100 / max(n.get("maxmem", 1), 1)),
+                           f"{taille(n.get('maxmem', 0) - n.get('mem', 0))} libres"))
+        else:
+            serveurs.append((f"Serveur {n['node']}", False, "hors ligne"))
+    invites = [r for r in res if r["type"] in ("qemu", "lxc") and not r.get("template")]
+    arretes = [f"{r['vmid']} {r.get('name', '')}".strip() for r in invites if r.get("status") != "running"]
+    serveurs.append(("VM et conteneurs", None if arretes else True,
+                     f"{len(invites) - len(arretes)}/{len(invites)} allumés" + (f" · arrêtés : {', '.join(arretes[:6])}" if arretes else "")))
+    return serveurs, jauges
+
+
+# ------------------------------------------------------------------ historique (graphique des 7 jours)
+
+def historique(chemin, aujourdhui=None):
+    try:
+        with open(chemin) as f:
+            h = json.load(f)
+    except (FileNotFoundError, ValueError):
+        h = []
+    if aujourdhui:
+        h = [x for x in h if x.get("date") != aujourdhui["date"]] + [aujourdhui]
+        h = sorted(h, key=lambda x: x["date"])[-60:]
+        try:
+            os.makedirs(os.path.dirname(chemin), exist_ok=True)
+            with open(chemin + ".tmp", "w") as f:
+                json.dump(h, f)
+            os.replace(chemin + ".tmp", chemin)
+        except OSError as e:
+            log(f"historique non enregistré : {e}")
+    return h
 
 
 # ------------------------------------------------------------------ le message
+# Mail HTML : uniquement des tableaux et des styles en ligne (Gmail retire le reste), aucune image, aucun script.
+# Tout ce qui vient d'un mail ou du modèle passe par html.escape.
+
+C = {"page": "#f3f3f1", "carte": "#ffffff", "bord": "#e4e3de", "texte": "#0b0b0b", "texte2": "#52514e", "discret": "#8a8984",
+     "piste": "#efeeea", "bleu": "#2a78d6", "bleu_clair": "#b7d3f6", "bon": "#0ca30c", "attention": "#fab219",
+     "critique": "#d03b3b"}
+POLICE = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+
+
+def expediteur(de):
+    nom, adresse = email.utils.parseaddr(de)
+    return nom or adresse or de
+
 
 def date_fr(d):
     return f"{JOURS[d.weekday()]} {d.day} {MOIS[d.month - 1]}"
 
 
-def construire(mails, tri, lignes, conf):
-    maintenant = datetime.now()
-    soucis = [l for l in lignes if l[1] is False]
-    sujet = f"☀️ Résumé du matin — {date_fr(maintenant)}" + (f" — ⚠️ {len(soucis)} souci(s)" if soucis else "")
-    e = html.escape
-    pastille = {True: "🟢", False: "🔴", None: "⚪"}
+def _pastille(ok, taille_px=8):
+    couleur = {True: C["bon"], False: C["critique"], None: C["attention"]}[ok]
+    return (f'<span style="display:inline-block;width:{taille_px}px;height:{taille_px}px;border-radius:50%;'
+            f'background:{couleur};vertical-align:middle"></span>')
 
+
+def _carte(titre, contenu, sous_titre=""):
+    st = f'<span style="color:{C["discret"]};font-weight:400"> · {sous_titre}</span>' if sous_titre else ""
+    return (f'<tr><td style="padding:0 0 14px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="background:{C["carte"]};border:1px solid {C["bord"]};border-radius:12px">'
+            f'<tr><td style="padding:18px 20px 6px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;'
+            f'color:{C["texte2"]}">{titre}{st}</td></tr><tr><td style="padding:6px 20px 18px">{contenu}</td></tr></table></td></tr>')
+
+
+def _tuile(etiquette, valeur, detail, ok=None, montrer_pastille=False):
+    p = _pastille(ok) + "&nbsp;" if montrer_pastille else ""
+    return (f'<td width="50%" valign="top" style="padding:6px"><table role="presentation" width="100%" cellpadding="0" '
+            f'cellspacing="0" style="background:{C["carte"]};border:1px solid {C["bord"]};border-radius:12px"><tr>'
+            f'<td style="padding:14px 16px"><div style="font-size:12px;color:{C["texte2"]}">{etiquette}</div>'
+            f'<div style="font-size:26px;font-weight:600;color:{C["texte"]};line-height:1.25;margin-top:4px">{valeur}</div>'
+            f'<div style="font-size:12px;color:{C["discret"]};margin-top:2px">{p}{detail}</div></td></tr></table></td>')
+
+
+def _jauge(nom, pc, detail):
+    e = html.escape
+    couleur = C["critique"] if pc >= 90 else C["attention"] if pc >= 75 else C["bleu"]
+    alerte = " · presque plein" if pc >= 90 else ""
+    return (f'<tr><td style="padding:8px 0 2px;font-size:14px;color:{C["texte"]}">{e(nom)}</td>'
+            f'<td align="right" style="padding:8px 0 2px;font-size:14px;font-weight:600;color:{C["texte"]}">{pc} %</td></tr>'
+            f'<tr><td colspan="2"><div style="background:{C["piste"]};border-radius:4px;height:8px;overflow:hidden">'
+            f'<div style="background:{couleur};width:{max(min(pc, 100), 2)}%;height:8px;border-radius:4px"></div></div></td></tr>'
+            f'<tr><td colspan="2" style="padding:3px 0 4px;font-size:12px;color:{C["discret"]}">{e(detail)}{alerte}</td></tr>')
+
+
+def _graphique_7_jours(hist, aujourdhui):
+    """Barres empilées : mails importants (bleu) + autres non lus (bleu clair), sur les 7 derniers jours."""
+    par_date = {x["date"]: x for x in hist}
+    jours = [aujourdhui - timedelta(days=k) for k in range(6, -1, -1)]
+    valeurs = [par_date.get(j.strftime("%Y-%m-%d")) for j in jours]
+    maxi = max([v["mails"] for v in valeurs if v] + [1])
+    haut = 96  # hauteur max des barres en px
+    cols = []
+    for j, v in zip(jours, valeurs):
+        est_auj = j.date() == aujourdhui.date()
+        if v:
+            h_imp = round(v["importants"] * haut / maxi)
+            h_aut = round((v["mails"] - v["importants"]) * haut / maxi)
+            vide = haut - h_imp - h_aut
+            etiq = (f'<div style="font-size:11px;font-weight:600;color:{C["texte"]};padding-bottom:3px">{v["mails"]}</div>'
+                    if est_auj or v["mails"] == maxi else "")
+            barre = (f'<div style="height:{max(vide - (16 if etiq else 0), 0)}px"></div>{etiq}'
+                     + (f'<div style="background:{C["bleu_clair"]};height:{h_aut}px;border-radius:4px 4px 0 0;'
+                        f'margin:0 auto;width:60%"></div>' if h_aut else "")
+                     + (f'<div style="height:2px"></div>' if h_aut and h_imp else "")
+                     + (f'<div style="background:{C["bleu"]};height:{h_imp}px;border-radius:{0 if h_aut else 4}px '
+                        f'{0 if h_aut else 4}px 0 0;margin:0 auto;width:60%"></div>' if h_imp else ""))
+        else:
+            barre = (f'<div style="height:{haut - 2}px"></div><div style="height:2px;background:{C["bord"]};'
+                     f'margin:0 auto;width:60%"></div>')
+        cols.append(f'<td valign="bottom" align="center" style="height:{haut + 16}px;width:14%">{barre}</td>')
+    libelles = "".join(
+        f'<td align="center" style="padding-top:6px;font-size:11px;color:{C["texte" if j.date() == aujourdhui.date() else "discret"]};'
+        f'font-weight:{"600" if j.date() == aujourdhui.date() else "400"}">{JOURS[j.weekday()][:3]}. {j.day}</td>' for j in jours)
+    legende = (f'<div style="font-size:12px;color:{C["texte2"]};padding-bottom:10px">'
+               f'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:{C["bleu"]};'
+               f'vertical-align:middle"></span>&nbsp;importants&nbsp;&nbsp;&nbsp;'
+               f'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:{C["bleu_clair"]};'
+               f'vertical-align:middle"></span>&nbsp;autres non lus</div>')
+    return (legende + f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="border-bottom:1px solid {C["bord"]}"><tr>{"".join(cols)}</tr></table>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{libelles}</tr></table>')
+
+
+def construire(mails, tri, etat, conf, hist=None):
+    maintenant = datetime.now()
+    e = html.escape
     if tri is None:
-        intro = "Le chat était indisponible ce matin : voici les mails sans tri."
-        importants = [(ml, "", "") for ml in mails[:10]]
+        intro = "Le chat était indisponible ce matin : voici les derniers mails, sans tri."
+        importants = [{"mail": ml, "titre": ml["sujet"], "resume": "", "categorie": "", "urgent": False} for ml in mails[:8]]
     else:
         importants, intro = tri
+    urgents = sum(1 for i in importants if i["urgent"])
+    services = etat["services"] + etat["serveurs"]
+    en_panne = [s for s in services if s[1] is False]
+    sauv_ok, sauv_txt, sauv_heure = etat["sauvegarde"]
+    alertes = len(en_panne) + (sauv_ok is False) + sum(1 for j in etat["jauges"] if j[1] >= 90)
 
-    # --- texte brut
-    t = [sujet, "", intro, "", f"📬 MAILS IMPORTANTS : {len(importants)} sur {len(mails)} non lus depuis hier", ""]
-    for ml, titre, res in importants:
-        t.append(f"• {titre or ml['sujet']}" + (f" — {res}" if res else ""))
-        t.append(f"  De : {ml['de']} | Sujet : {ml['sujet']}")
-    t += ["", "🖥️ HOMELAB", ""] + [f"{pastille[ok]} {nom} : {det}" for nom, ok, det in lignes]
+    pl = lambda n, mot: f"{n} {mot}{'s' if n > 1 else ''}"
+    sujet = f"Résumé du matin — {date_fr(maintenant)} · {pl(len(importants), 'mail')} à voir"
+    if alertes:
+        sujet += f" · {pl(alertes, 'alerte')}"
 
-    # --- HTML (tout est échappé : rien de ce qui vient d'un mail ne peut ajouter du code)
-    h = ['<div style="font-family:system-ui,-apple-system,sans-serif;max-width:640px;color:#222;line-height:1.45">',
-         f'<h2 style="margin:0 0 4px">☀️ Bonjour — {e(date_fr(maintenant))}</h2>',
-         f'<p style="margin:0 0 18px;color:#555">{e(intro)}</p>',
-         f'<h3 style="margin:0 0 8px">📬 Mails importants <span style="color:#888;font-weight:normal">'
-         f'— {len(importants)} sur {len(mails)} non lus depuis hier</span></h3>']
+    # ---------------- texte brut (lu par les applis qui n'affichent pas le HTML)
+    t = [sujet, "", intro, "", f"MAILS À VOIR ({len(importants)} sur {len(mails)} non lus)"]
+    for i in importants:
+        t.append(f"- {'[URGENT] ' if i['urgent'] else ''}{i['titre'] or i['mail']['sujet']}"
+                 + (f" : {i['resume']}" if i["resume"] else "") + f"  ({i['mail']['de']})")
+    t += ["", f"SAUVEGARDE : {sauv_txt} ({sauv_heure})", "SERVICES :"]
+    t += [f"- {nom} : {det}" for nom, ok, det in services]
+    t += [f"- {nom} : {pc} % ({det})" for nom, pc, det in etat["jauges"]]
+
+    # ---------------- HTML
+    entete = (f'<tr><td style="padding:8px 6px 18px"><div style="font-size:12px;font-weight:600;letter-spacing:.08em;'
+              f'text-transform:uppercase;color:{C["discret"]}">Résumé du matin · Homelab</div>'
+              f'<div style="font-size:28px;font-weight:600;color:{C["texte"]};margin-top:6px;line-height:1.2">'
+              f'{e(date_fr(maintenant).capitalize())}</div>'
+              f'<div style="font-size:15px;color:{C["texte2"]};margin-top:8px;line-height:1.5">{e(intro)}</div></td></tr>')
+
+    total_srv = len(services)
+    ok_srv = sum(1 for s in services if s[1] is not False)
+    disque = next((j for j in etat["jauges"] if j[0].startswith("Disque")), None)
+    tuiles = (
+        '<tr><td style="padding:0 0 8px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+        + _tuile("Mails à voir", str(len(importants)),
+                 f"dont {urgents} urgent{'s' if urgents > 1 else ''}" if urgents else f"sur {len(mails)} non lus",
+                 ok=False if urgents else None, montrer_pastille=bool(urgents))
+        + _tuile("Services", f"{ok_srv}/{total_srv}", "tout fonctionne" if not en_panne else f"{len(en_panne)} en panne",
+                 ok=not en_panne, montrer_pastille=True)
+        + '</tr><tr>'
+        + _tuile("Sauvegarde", e(sauv_txt.capitalize()), e(sauv_heure), ok=sauv_ok, montrer_pastille=True)
+        + (_tuile("Disque", f"{disque[1]} %", e(disque[2]), ok=disque[1] < 90 if disque[1] >= 75 else True,
+                  montrer_pastille=True) if disque else _tuile("Disque", "—", "inconnu"))
+        + '</tr></table></td></tr>')
+
     if importants:
-        for ml, titre, res in importants:
-            h.append('<div style="border-left:4px solid #4a7cf7;padding:6px 12px;margin:0 0 10px;background:#f5f8ff;border-radius:4px">'
-                     f'<b>{e(titre or ml["sujet"])}</b>' + (f'<br>{e(res)}' if res else "") +
-                     f'<br><span style="color:#777;font-size:13px">{e(ml["de"])} · {e(ml["sujet"])}</span></div>')
+        lignes = []
+        for k, i in enumerate(importants):
+            ml = i["mail"]
+            badges = ""
+            if i["urgent"]:
+                badges += (f'<span style="display:inline-block;font-size:11px;font-weight:600;color:{C["critique"]};'
+                           f'border:1px solid {C["critique"]};border-radius:10px;padding:1px 8px;margin-right:6px">Urgent</span>')
+            if i["categorie"]:
+                badges += (f'<span style="display:inline-block;font-size:11px;color:{C["texte2"]};background:{C["piste"]};'
+                           f'border-radius:10px;padding:2px 8px">{e(i["categorie"])}</span>')
+            sep = f"border-top:1px solid {C['bord']};" if k else ""
+            lignes.append(
+                f'<tr><td style="{sep}padding:12px 0">'
+                + (f'<div style="padding-bottom:6px">{badges}</div>' if badges else "")
+                + f'<div style="font-size:15px;font-weight:600;color:{C["texte"]}">{e(i["titre"] or ml["sujet"])}</div>'
+                + (f'<div style="font-size:14px;color:{C["texte2"]};margin-top:3px;line-height:1.45">{e(i["resume"])}</div>'
+                   if i["resume"] else "")
+                + f'<div style="font-size:12px;color:{C["discret"]};margin-top:5px">{e(expediteur(ml["de"]))} · {e(ml["sujet"])}</div>'
+                + '</td></tr>')
+        bloc_mails = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(lignes)}</table>'
     else:
-        h.append('<p style="color:#555">Rien d\'important cette nuit. 🎉</p>')
-    h.append('<h3 style="margin:22px 0 8px">🖥️ Homelab</h3><table style="border-collapse:collapse;width:100%;font-size:14px">')
-    for nom, ok, det in lignes:
-        fond = "#fff1f1" if ok is False else "transparent"
-        h.append(f'<tr style="background:{fond}"><td style="padding:5px 8px;border-bottom:1px solid #eee">{pastille[ok]} {e(nom)}</td>'
-                 f'<td style="padding:5px 8px;border-bottom:1px solid #eee;color:#555">{e(det)}</td></tr>')
-    h.append('</table><p style="color:#999;font-size:12px;margin-top:22px">Fait par le Spark, sans rien envoyer : ce message '
-             'a été déposé directement dans ta boîte.</p></div>')
+        bloc_mails = f'<div style="font-size:14px;color:{C["texte2"]}">Rien d\'important cette nuit.</div>'
+
+    srv = "".join(
+        f'<tr><td style="padding:6px 0;font-size:14px;color:{C["texte"]};border-bottom:1px solid {C["piste"]}">'
+        f'{_pastille(ok)}&nbsp;&nbsp;{e(nom)}</td><td align="right" style="padding:6px 0;font-size:13px;'
+        f'color:{C["critique"] if ok is False else C["discret"]};border-bottom:1px solid {C["piste"]}">{e(det)}</td></tr>'
+        for nom, ok, det in sorted(services, key=lambda s: {False: 0, None: 1, True: 2}[s[1]]))
+    jauges = "".join(_jauge(*j) for j in etat["jauges"])
+    bloc_homelab = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{srv}</table>'
+                    + (f'<div style="height:14px"></div><table role="presentation" width="100%" cellpadding="0" '
+                       f'cellspacing="0">{jauges}</table>' if jauges else ""))
+
+    cartes = _carte("À voir aujourd'hui", bloc_mails, f"{len(importants)} sur {len(mails)} non lus")
+    if hist:
+        cartes += _carte("Mails des 7 derniers jours", _graphique_7_jours(hist, maintenant))
+    cartes += _carte("Homelab", bloc_homelab)
+
+    page = (f'<div style="background:{C["page"]};padding:20px 10px;font-family:{POLICE}">'
+            f'<table role="presentation" align="center" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="max-width:620px;margin:0 auto">{entete}{tuiles}{cartes}'
+            f'<tr><td style="padding:4px 6px 0;font-size:11px;color:{C["discret"]};line-height:1.5">'
+            f'Préparé par le Spark à {maintenant:%H:%M}. Ce message a été déposé dans ta boîte : rien n\'a été envoyé.'
+            f'</td></tr></table></div>')
 
     msg = EmailMessage()
     adresse = conf.get("MAIL_FROM") or conf["MAIL_USER"]
-    msg["From"] = email.utils.formataddr(("Spark", adresse))
+    msg["From"] = email.utils.formataddr(("Spark · Homelab", adresse))
     msg["To"] = adresse
     msg["Subject"] = sujet
     msg["Date"] = email.utils.formatdate(localtime=True)
     msg["Message-ID"] = email.utils.make_msgid(domain="spark.local")
     msg["X-Resume-Matin"] = "1"
     msg.set_content("\n".join(t))
-    msg.add_alternative("\n".join(h), subtype="html")
-    return msg, "\n".join(h)
+    msg.add_alternative(f'<!doctype html><html><body style="margin:0;padding:0">{page}</body></html>', subtype="html")
+    return msg, page
 
 
 def deposer(m, msg, libelle):
@@ -405,11 +590,17 @@ def main():
         m.logout()  # on ne garde pas la connexion ouverte pendant que le modèle réfléchit
     log(f"{len(mails)} mail(s) non lu(s) depuis hier")
     tri = trier(mails)
-    lignes = etat_homelab(conf)
-    msg, page = construire(mails, tri, lignes, conf)
+    etat = etat_homelab(conf)
+    nb_imp = len(tri[0]) if tri else 0
+    hist = historique(HISTORIQUE, None if test else {"date": datetime.now().strftime("%Y-%m-%d"), "mails": len(mails),
+                                                    "importants": nb_imp})
+    if test:  # en test on montre le jour courant dans le graphique sans l'enregistrer
+        hist = [x for x in hist if x["date"] != datetime.now().strftime("%Y-%m-%d")] + [
+            {"date": datetime.now().strftime("%Y-%m-%d"), "mails": len(mails), "importants": nb_imp}]
+    msg, page = construire(mails, tri, etat, conf, hist)
     if test:
         with open("resume-test.html", "w", encoding="utf-8") as f:
-            f.write(page)
+            f.write(f'<!doctype html><meta charset="utf-8"><body style="margin:0">{page}')
         log(f"test : {msg['Subject']} → resume-test.html (rien n'a été déposé)")
         return 0
     m = connexion(conf)

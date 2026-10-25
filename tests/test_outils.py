@@ -47,9 +47,11 @@ def test_proxmox_range_dans_le_pool(monkeypatch):
 
     async def api(methode, chemin, donnees=None):
         if chemin.startswith("/cluster/resources"):
+            return [{"type": "node", "node": "pve", "status": "online", "mem": 0, "maxmem": 2**34}]
+        if chemin.endswith("content=vztmpl"):
             return []
         if methode == "POST":
-            envoye.update(donnees)
+            envoye[chemin] = donnees
             return "UPID:x"
         return {"status": "stopped", "exitstatus": "OK"}
 
@@ -58,7 +60,7 @@ def test_proxmox_range_dans_le_pool(monkeypatch):
     monkeypatch.setattr(t, "_a", api)
     monkeypatch.setattr(proxmox_tool, "_ip_occupee", lambda ip: False)
     asyncio.run(t.creer_conteneur("test", __event_call__=oui))
-    assert envoye["pool"] == "agent"
+    assert envoye["/nodes/pve/lxc"]["pool"] == "agent"
 
 
 def test_proxmox_refuse_les_machines_protegees(monkeypatch):
@@ -70,6 +72,32 @@ def test_proxmox_refuse_les_machines_protegees(monkeypatch):
     monkeypatch.setattr(t, "_a", api)
     assert "Refusé" in asyncio.run(t.arreter(110))
     assert "Refusé" in asyncio.run(t.supprimer(110))
+
+
+def test_proxmox_supprimer_lit_l_etat_reel(monkeypatch):
+    """Juste après un arrêt, /cluster/resources dit encore « running » : on se fie à status/current."""
+    import proxmox_tool
+    t = proxmox_tool.Tools()
+    appels = []
+
+    async def api(methode, chemin, donnees=None):
+        appels.append((methode, chemin))
+        if chemin.startswith("/cluster/resources"):
+            return [{"vmid": 120, "type": "lxc", "node": "pve", "name": "essai", "status": "running"}]
+        if chemin == "/nodes/pve/lxc/120/status/current":
+            return {"status": "stopped"}
+        if "content=backup" in chemin:
+            return []
+        if methode == "DELETE":
+            return "UPID:x"
+        return {"status": "stopped", "exitstatus": "OK"}
+
+    async def oui(_):
+        return True  # pas un dict : la fenêtre « ne s'ouvre pas », on retombe sur la confirmation simple
+    monkeypatch.setattr(t, "_a", api)
+    assert "OK" in asyncio.run(t.supprimer(120, __event_call__=oui))
+    assert ("DELETE", "/nodes/pve/lxc/120?purge=1&destroy-unreferenced-disks=1") in appels
+    assert not any(c.endswith("/status/stop") for _, c in appels)
 
 
 def test_serveurs_mcp_figes():

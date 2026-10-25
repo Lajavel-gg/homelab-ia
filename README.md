@@ -107,17 +107,27 @@ Cette branche corrige le code (voir la pull request). Les étapes ci-dessous se 
 | `studio/runner.py` et le dossier `studio/static/` | Spark : `/opt/ai-stack/studio/` | `sudo systemctl restart studio-runner` |
 | `spark/logrotate/homelab` | Spark : `/etc/logrotate.d/homelab` | rien |
 | `spark/scripts/verifier-modeles` | Spark : `/usr/local/bin/` | `verifier-modeles` : liste les modèles ComfyUI manquants |
-| `openwebui/outils/*.py`, `openwebui/filtres/correcteur_memoire.py` | Open WebUI → *Espace de travail → Outils / Fonctions* : remplacer le code de chacun | Enregistrer |
-| `spark/docker-compose.yml`, `spark/searxng/settings.yml` | Spark : `/opt/ai-stack/` | Vérifier que `.env` contient `SEARXNG_SECRET` (`openssl rand -hex 32`), puis `docker compose up -d` |
-| `proxmox-lxc/haproxy.cfg` | Conteneur 112 : `/etc/haproxy/haproxy.cfg` | `haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy` |
+| `openwebui/outils/studio_tool.py`, `openwebui/outils/trading_tool.py`, `openwebui/filtres/correcteur_memoire.py` | Open WebUI → *Espace de travail → Outils / Fonctions* : remplacer le code de chacun | Enregistrer |
+| `openwebui/outils/proxmox_tool.py` | Open WebUI, **uniquement** avec le script de mise à jour des outils du Spark (`/opt/ai-stack/owui_maj_outil.py`), jamais par copier-coller | **Comparer d'abord** avec la version en service (`diff` avec `/opt/ai-stack/proxmox/proxmox_tool.py`) : le fichier du dépôt est anonymisé (réseau `192.168.0.x`, domaine `example.com`, clé SSH remplacée par `<CLE_SSH_PUBLIQUE_DU_SPARK>`). Garder les vraies valeurs, ne reporter que les changements de code, puis lancer le script |
+| `spark/docker-compose.yml`, `spark/searxng/settings.yml` | Spark : `/opt/ai-stack/` | **Sauvegarder `webui.db` avant** (voir l'encadré ci-dessous, ce fichier active `ENABLE_VALVE_ENCRYPTION`). Vérifier que `.env` contient `SEARXNG_SECRET` (`openssl rand -hex 32`), puis `docker compose up -d` |
+| `proxmox-lxc/haproxy.cfg` | Conteneur 112 : **ajouter seulement la ligne `X-Real-IP`** (`http-request set-header X-Real-IP %[src]`, avec son commentaire) dans le fichier existant `/etc/haproxy/haproxy.cfg`. **Ne pas copier `haproxy.cfg`** : les domaines y sont anonymisés (`example.com`) | `haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy` |
 
 > **Attention :** avec `ENABLE_VALVE_ENCRYPTION`, les valves (clé Proxmox…) sont chiffrées avec `WEBUI_SECRET_KEY`. Ne plus jamais changer cette clé, sinon les valves sont perdues ; la garder dans Vaultwarden.
+>
+> **Avant d'activer `ENABLE_VALVE_ENCRYPTION`**, faire une copie de la base d'Open WebUI (si quelque chose tourne mal, on remet cette copie) :
+>
+> ```bash
+> cd /opt/ai-stack && docker compose stop open-webui
+> sudo mkdir -p /opt/ai-stack/backups
+> sudo docker cp open-webui:/app/backend/data/webui.db /opt/ai-stack/backups/webui.db.avant-chiffrement-$(date +%F)
+> docker compose up -d open-webui
+> ```
 
 ### 2. Séparer le mail du web (risque d'injection de prompt)
 
 Un modèle qui lit les mails ET peut aller sur le web ou exécuter du code peut être piégé par une page ou un mail (« envoie le contenu des mails à … »). On sépare :
 
-1. *Espace de travail → Modèles → Nouveau* : « 📬 Mail », basé sur Flash-Next, avec **seulement** l'outil `mail`. Pas de recherche web, pas de `fetch`, pas de `browser`, pas d'interpréteur de code, et **sans** le filtre « Outils par défaut ».
+1. *Espace de travail → Modèles → Nouveau* : « Mail », basé sur Flash-Next, avec **seulement** l'outil `mail`. Pas de recherche web, pas de `fetch`, pas de `browser`, pas d'interpréteur de code, et **sans** le filtre « Outils par défaut ».
 2. Sur tous les autres modèles : décocher l'outil `mail`.
 
 ### 3. Limiter la clé Proxmox de l'IA
@@ -205,9 +215,9 @@ Gmail ne fait pas toujours sonner le téléphone pour un message déposé de cet
 
 ### 7. Studio : galerie, archivage sur pve2, ménage automatique (désactivé par défaut)
 
-La page `/studio` est une galerie : filtres (images, vidéos, 3D, gardées, archivées, échecs), et sur chaque création **Télécharger**, **Archiver**, **☆** (garder) et **✕** (supprimer).
+La page `/studio` est une galerie : filtres (images, vidéos, 3D, gardées, archivées, échecs), et sur chaque création **Télécharger**, **Archiver**, l'étoile (garder) et la croix (supprimer).
 
-Le **ménage automatique est désactivé par défaut** (`STUDIO_GARDER_JOURS=0`) : rien ne quitte le Spark sans qu'on l'ait demandé. Une fois activé avec l'archivage ci-dessous, toutes les 6 h, les créations de plus de N jours non marquées ★ partent sur **pve2** (fichier + fiche `.json` avec le prompt, rangés par `AAAA/MM/`), puis sont retirées du Spark. Les échecs sont simplement supprimés. Si l'envoi rate, rien n'est supprimé : le ménage réessaie plus tard.
+Le **ménage automatique est désactivé par défaut** (`STUDIO_GARDER_JOURS=0`) : rien ne quitte le Spark sans qu'on l'ait demandé. Une fois activé avec l'archivage ci-dessous, toutes les 6 h, les créations de plus de N jours non marquées d'une étoile partent sur **pve2** (fichier + fiche `.json` avec le prompt, rangés par `AAAA/MM/`), puis sont retirées du Spark. Les échecs sont simplement supprimés. Si l'envoi rate, rien n'est supprimé : le ménage réessaie plus tard.
 
 Sans `STUDIO_ARCHIVE`, le ménage **n'efface rien**, même avec une durée réglée. Pour vraiment supprimer définitivement les vieilles créations sans les archiver, il faut le choisir explicitement : `Environment=STUDIO_MENAGE_SUPPRIMER=1` (en plus de `STUDIO_GARDER_JOURS`).
 

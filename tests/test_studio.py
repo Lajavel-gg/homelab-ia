@@ -62,8 +62,27 @@ def test_fichier_hors_media_jamais_touche(studio, tmp_path):
     assert precieux.exists()
 
 
-def test_menage(studio):
+def test_menage_desactive_par_defaut(studio, monkeypatch):
+    """Par défaut rien n'est effacé ; sans archivage, rien non plus tant que la suppression n'est pas choisie."""
+    media, _ = studio
+    monkeypatch.delenv("STUDIO_GARDER_JOURS", raising=False)
+    monkeypatch.delenv("STUDIO_MENAGE_SUPPRIMER", raising=False)
+    source = open(runner.__file__).read()
+    assert 'os.environ.get("STUDIO_GARDER_JOURS", "0")' in source
+    monkeypatch.setattr(runner, "GARDER_JOURS", 0)
+    monkeypatch.setattr(runner, "ARCHIVE", "")
+    monkeypatch.setattr(runner, "MENAGE_SUPPRIMER", False)
+    vieux = creation(media, "4444444444", 400)
+    echec = creation(media, "5555555555", 400, statut="échec")
+    assert runner.nettoyer() == (0, 0)
+    assert runner.nettoyer(jours=60) == (0, 0)  # durée réglée mais ni STUDIO_ARCHIVE ni STUDIO_MENAGE_SUPPRIMER=1
+    assert vieux.exists() and echec.exists() and "4444444444" in runner.jobs
+
+
+def test_menage(studio, monkeypatch):
     media, sortie = studio
+    monkeypatch.setattr(runner, "ARCHIVE", "")
+    monkeypatch.setattr(runner, "MENAGE_SUPPRIMER", True)  # suppression définitive choisie explicitement
     vieux = creation(media, "1111111111", 90)
     garde = creation(media, "2222222222", 90, garder=True)
     recent = creation(media, "3333333333", 5)

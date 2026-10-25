@@ -46,12 +46,15 @@ PAUSE = os.environ.get("STUDIO_PAUSE", "/run/studio-pause")
 # Lecteur 3D servi en local (avant : CDN, donc pas de 3D sans internet). Copié dans MEDIA au démarrage,
 # car Caddy sert /studio/media sans mot de passe (l'iframe du chat ne peut pas en donner).
 VIEWER = "model-viewer-4.0.0.min.js"
-# Ménage automatique : les créations plus vieilles que ça quittent le Spark (sauf celles marquées « garder »). 0 = jamais.
-GARDER_JOURS = int(os.environ.get("STUDIO_GARDER_JOURS", "60"))
+# Ménage automatique : les créations plus vieilles que ça quittent le Spark (sauf celles marquées « garder »).
+# Désactivé par défaut (0 = jamais) : on l'active soi-même, de préférence avec STUDIO_ARCHIVE.
+GARDER_JOURS = int(os.environ.get("STUDIO_GARDER_JOURS", "0"))
 # Archivage sur le serveur Proxmox (pve2) au lieu de la suppression : destination rsync, ex. « studio@192.168.0.201: ».
 # La clé SSH n'a le droit que d'AJOUTER des fichiers (rrsync -wo côté pve2, voir le README). Vide = suppression.
 ARCHIVE = os.environ.get("STUDIO_ARCHIVE", "").strip()
 ARCHIVE_CLE = os.environ.get("STUDIO_ARCHIVE_CLE", "/opt/ai-stack/studio/archive_ed25519")
+# Sans STUDIO_ARCHIVE, le ménage n'efface JAMAIS rien définitivement, sauf choix explicite STUDIO_MENAGE_SUPPRIMER=1.
+MENAGE_SUPPRIMER = os.environ.get("STUDIO_MENAGE_SUPPRIMER", "").strip() == "1"
 RE_JID = re.compile(r"[0-9a-f]{10}")
 RE_MEDIA = re.compile(r"/studio/media/([0-9a-f]{32}\.[a-z0-9]{2,4})")
 
@@ -524,7 +527,7 @@ def nettoyer(jours=None, maintenant=None):
     Les rendus publiés sont des liens durs : effacer l'original de ComfyUI ne les touche pas.
     Renvoie (créations archivées ou supprimées, fichiers supprimés)."""
     jours = GARDER_JOURS if jours is None else jours
-    if jours <= 0:
+    if jours <= 0 or not (ARCHIVE or MENAGE_SUPPRIMER):
         return 0, 0
     limite = (maintenant or time.time()) - jours * 86400
     with lock:
@@ -560,6 +563,8 @@ def nettoyer(jours=None, maintenant=None):
 
 
 def menage():
+    if GARDER_JOURS > 0 and not (ARCHIVE or MENAGE_SUPPRIMER):
+        log(f"ménage : STUDIO_GARDER_JOURS={GARDER_JOURS} mais ni STUDIO_ARCHIVE ni STUDIO_MENAGE_SUPPRIMER=1 : rien ne sera effacé")
     while True:
         try:
             n_jobs, n_fichiers = nettoyer()
@@ -712,7 +717,7 @@ class H(BaseHTTPRequestHandler):
             with lock:
                 return self.send(200, {k: {x: y for x, y in v.items() if x != "image_b64"} for k, v in jobs.items()})
         if p == "/studio/api/place":
-            return self.send(200, {"octets": place_utilisee(), "garder_jours": GARDER_JOURS, "archive": bool(ARCHIVE)})
+            return self.send(200, {"octets": place_utilisee(), "garder_jours": GARDER_JOURS if (ARCHIVE or MENAGE_SUPPRIMER) else 0, "archive": bool(ARCHIVE)})
         if p.startswith("/studio/api/jobs/"):
             jid = p.rsplit("/", 1)[1]
             with lock:

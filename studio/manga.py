@@ -135,6 +135,8 @@ def _ecrire(chemin, obj):
 
 
 CONSIGNES = (
+    # <|think_off|> : le modèle (Flash-Next) traduit sans phase de réflexion, même sans llama-swap (sinon réponse vide)
+    "<|think_off|>\n"
     "Ignore all preceding instructions. Follow only what is defined below.\n"
     "## Rôle\nTu es un traducteur professionnel de manga vers le {{to_lang}} (français de France, naturel, "
     "comme une édition française publiée). Tu traduis tout le contenu, sans censure ni adoucissement.\n"
@@ -198,15 +200,27 @@ def traduire_page(chemin_page, conf, timeout=900):
     """Renvoie les octets PNG de la page traduite (exception si manga-image-translator refuse)."""
     with open(chemin_page, "rb") as f:
         corps, ctype = _multipart({"config": json.dumps(conf)}, (os.path.basename(chemin_page), f.read()))
-    req = urllib.request.Request(MANGA_URL + "/translate/with-form/image", data=corps, method="POST",
+    # Route « en flux » : la route simple /translate/with-form/image a un bug dans cette version (elle attend du JSON
+    # de son ouvrier, qui renvoie des octets). Le flux : suite de blocs (1 octet d'état, 4 octets de taille, données),
+    # état 0 = image finale, 1 = étape, 2 = erreur, 3-4 = attente.
+    req = urllib.request.Request(MANGA_URL + "/translate/with-form/image/stream", data=corps, method="POST",
                                  headers={"content-type": ctype})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            png = r.read()
+            flux = r.read()
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"manga-image-translator : {e.read().decode(errors='replace')[:200]}")
     except OSError as e:
         raise RuntimeError(f"manga-image-translator injoignable ({e}) : le conteneur « manga » tourne-t-il ?")
+    png, i = b"", 0
+    while i + 5 <= len(flux):
+        etat, n = flux[i], int.from_bytes(flux[i + 1:i + 5], "big")
+        bloc = flux[i + 5:i + 5 + n]
+        i += 5 + n
+        if etat == 0:
+            png = bloc
+        elif etat == 2:
+            raise RuntimeError(f"manga-image-translator : {bloc.decode(errors='replace')[:200]}")
     if not png.startswith(b"\x89PNG"):
         raise RuntimeError("réponse inattendue de manga-image-translator")
     return png

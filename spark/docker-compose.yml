@@ -134,6 +134,8 @@ services:
       CUSTOM_OPENAI_API_BASE: http://127.0.0.1:8090/v1
       CUSTOM_OPENAI_MODEL: manga   # alias de Flash-Next sans phase de réflexion (llama-swap)
       CUSTOM_OPENAI_API_KEY: none
+      # bug de cette version : le serveur n'envoie pas le nonce à son ouvrier ; les deux n'écoutent que sur 127.0.0.1
+      MT_WEB_NONCE: "None"
     volumes:
       - manga-models:/app/models
       # consignes et carnets des séries, écrits par le Studio, lus au même chemin

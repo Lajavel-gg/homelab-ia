@@ -127,12 +127,23 @@ class FauxMIT:
                 conf = json.loads(corps.split(b'name="config"\r\n\r\n', 1)[1].split(b"\r\n--", 1)[0])
                 consignes = json.load(open(conf["translator"]["gpt_config"]))["chat_system_template"]
                 recus.append({"conf": conf, "consignes": consignes})
+                flux = self.path.endswith("/stream")
+                bloc = lambda etat, x: bytes([etat]) + len(x).to_bytes(4, "big") + x
                 if len(recus) in en_erreur:
+                    if flux:  # comme le vrai : réponse 200, erreur dans un bloc d'état 2
+                        d = bloc(1, b"detection") + bloc(2, b"OCR")
+                        self.send_response(200)
+                        self.send_header("content-length", str(len(d)))
+                        self.end_headers()
+                        self.wfile.write(d)
+                        return
                     self.send_response(500)
                     self.end_headers()
                     self.wfile.write(b'{"detail":"OCR"}')
                     return
                 d = png(len(recus))
+                if flux:
+                    d = bloc(1, b"rendering") + bloc(0, d)
                 self.send_response(200)
                 self.send_header("content-length", str(len(d)))
                 self.end_headers()

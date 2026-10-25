@@ -52,8 +52,9 @@ JOURS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre",
         "décembre"]
 
-SERVICES = [  # (nom affiché, unité systemd)
-    ("Chat (Flash-Next)", "llama-flashnext"),
+CHAT = ("llama-flashnext", "llama-swap")  # le chat tourne avec l'une OU l'autre (voir spark/scripts/activer-llama-swap)
+SERVICES = [  # (nom affiché, unité systemd ou tuple d'unités : en marche si l'une d'elles l'est)
+    ("Chat (Flash-Next)", CHAT),
     ("Studio", "studio-runner"),
     ("Voix (Whisper)", "whisper-server"),
     ("Dictionnaire des sons", "phonetique"),
@@ -226,12 +227,39 @@ def llama_pret(attente_max=1200):
             time.sleep(15)
             continue
         try:
-            if http_json(LLAMA + "/health", timeout=5).get("status") == "ok":
-                return True
+            with urllib.request.urlopen(LLAMA + "/health", timeout=5) as r:
+                if sante_ok(r.read()):
+                    return True
         except Exception:  # noqa: BLE001
             pass
         time.sleep(15)
     return False
+
+
+def sante_ok(corps: bytes) -> bool:
+    """Réponse de /health : llama-server renvoie {"status": "ok"}, llama-swap renvoie le texte « OK »."""
+    texte = corps.decode("utf-8", "replace").strip()
+    if texte.lower() == "ok":
+        return True
+    try:
+        return json.loads(texte).get("status") == "ok"
+    except (ValueError, AttributeError):
+        return False
+
+
+def etat_unites(unites):
+    """État systemd d'un service : « active » si l'une des unités l'est, sinon « failed » si l'une est en panne,
+    sinon l'état de la première. None si systemctl ne répond pas."""
+    etats = []
+    for u in (unites,) if isinstance(unites, str) else unites:
+        try:
+            etats.append(subprocess.run(["systemctl", "is-active", u], capture_output=True, text=True,
+                                        timeout=10).stdout.strip())
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    if "active" in etats:
+        return "active"
+    return "failed" if "failed" in etats else (etats[0] if etats else None)
 
 
 def trier(mails):
@@ -289,13 +317,12 @@ def etat_homelab(conf):
     except Exception:  # noqa: BLE001
         pass
     for nom, unite in SERVICES:
-        try:
-            r = subprocess.run(["systemctl", "is-active", unite], capture_output=True, text=True, timeout=10).stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
+        r = etat_unites(unite)
+        if r is None:
             continue
         if r == "active":
             services.append((nom, True, "en marche"))
-        elif unite == "llama-flashnext" and video:
+        elif unite == CHAT and video:
             services.append((nom, None, "en pause (vidéo en cours)"))
         elif r in ("inactive", "failed", "activating", "deactivating"):
             services.append((nom, False, {"failed": "en panne", "inactive": "arrêté"}.get(r, r)))

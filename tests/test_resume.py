@@ -184,3 +184,52 @@ def test_mauvaise_cle_proxmox(faux_proxmox, monkeypatch):
     monkeypatch.setattr(rm, "http_json", lambda url, *a, **k: vrai_http(url.replace(":8006/", f":{faux_proxmox['port']}/"), *a, **k))
     pve = rm.etat_proxmox({"PVE_HOST": "127.0.0.1", "PVE_TOKEN_ID": "x", "PVE_TOKEN_SECRET": "y", "PVE_CA": faux_proxmox["ca"]})
     assert pve["erreur"] and rm.problemes_proxmox(pve)
+
+
+# ------------------------------------------------------------------ chat : llama-server ou llama-swap
+
+@pytest.mark.parametrize("corps, attendu", [
+    (b"OK", True), (b"OK\n", True), (b'{"status": "ok"}', True),
+    (b'{"status": "loading model"}', False), (b"", False), (b"<html>erreur</html>", False), (b"[]", False),
+])
+def test_sante_llama(corps, attendu):
+    assert rm.sante_ok(corps) is attendu
+
+
+@pytest.mark.parametrize("corps", [b"OK", b'{"status": "ok"}'])
+def test_llama_pret_llama_swap_et_llama_server(corps, monkeypatch, tmp_path):
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-length", str(len(corps)))
+            self.end_headers()
+            self.wfile.write(corps)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(rm, "LLAMA", f"http://127.0.0.1:{srv.server_address[1]}")
+        monkeypatch.setattr(rm, "PAUSE", str(tmp_path / "pas-de-pause"))
+        assert rm.llama_pret(attente_max=5) is True
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("etats, attendu", [
+    ({"llama-flashnext": "active", "llama-swap": "inactive"}, "active"),
+    ({"llama-flashnext": "inactive", "llama-swap": "active"}, "active"),
+    ({"llama-flashnext": "inactive", "llama-swap": "inactive"}, "inactive"),
+    ({"llama-flashnext": "inactive", "llama-swap": "failed"}, "failed"),
+])
+def test_chat_en_marche_avec_l_une_ou_l_autre_unite(etats, attendu, monkeypatch):
+    def faux_run(cmd, **k):
+        return subprocess.CompletedProcess(cmd, 0, stdout=etats[cmd[-1]] + "\n")
+    monkeypatch.setattr(rm.subprocess, "run", faux_run)
+    assert rm.etat_unites(rm.CHAT) == attendu
+    monkeypatch.setattr(rm, "SERVICES", [("Chat", rm.CHAT)])
+    monkeypatch.setattr(rm, "PAGES", [])
+    monkeypatch.setattr(rm, "STUDIO", "http://127.0.0.1:1/aucun")
+    services = rm.etat_homelab({})["services"]
+    assert services[0][:2] == ("Chat", attendu == "active")

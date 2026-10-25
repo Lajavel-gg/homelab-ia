@@ -447,6 +447,8 @@ def worker():
 
 # ---------------------------------------------------------------- manga
 
+# Mémoire à garder libre avant de traduire un manga (Go) : les modèles du conteneur « manga » en prennent quelques-uns.
+MEM_MANGA = int(os.environ.get("STUDIO_MEM_MANGA", "12"))
 AVEC_PAUSE = ("video", "video_image", "video_longue", "3d", "3d_texte")  # ont besoin de toute la mémoire
 
 
@@ -464,6 +466,7 @@ def manga_chapitre(jid, j):
     del fichiers
     update(jid, nb_pages=len(pages), etape=f"{len(pages)} page(s) à traduire")
     comfy_free()  # ComfyUI rend sa mémoire ; manga-image-translator et le chat en ont besoin
+    wait_mem(MEM_MANGA, jid)  # modèles de détection, OCR et effacement des bulles : quelques Go à côté du chat
     sortie = os.path.join(dossier, "sortie")
     os.makedirs(sortie, exist_ok=True)
     chemin_consignes = manga.consignes(serie)
@@ -508,6 +511,7 @@ def manga_refaire(jid, j):
         raise RuntimeError(f"page {n} inexistante : le chapitre a {len(entrees)} page(s)")
     update(jid, etape=f"je retraduis la page {n}", serie=chap.get("serie"))
     comfy_free()
+    wait_mem(MEM_MANGA, jid)
     chemin_consignes = manga.consignes(chap.get("serie") or "Sans titre", remarque)
     try:
         png = manga.traduire_page(entrees[n - 1], manga.configuration(chap.get("langue") or "auto", chemin_consignes))

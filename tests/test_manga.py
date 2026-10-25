@@ -47,6 +47,7 @@ def dossiers(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "COMFY_OUT", str(tmp_path / "out"))
     monkeypatch.setattr(runner, "JOBS_FILE", str(tmp_path / "jobs.json"))
     monkeypatch.setattr(runner, "comfy_free", lambda: None)
+    monkeypatch.setattr(runner, "MEM_MANGA", 0)  # la machine de test (GitHub) a peu de mémoire
     os.makedirs(tmp_path / "media")
     runner.jobs.clear()
     yield tmp_path

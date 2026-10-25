@@ -2,13 +2,18 @@
 # garde-memoire <Go> <commande…> — utilisé par llama-swap devant chaque llama-server.
 # Refuse de démarrer un modèle si le Studio a mis le chat en pause (vidéo ou 3D en cours : ComfyUI a besoin de toute
 # la mémoire), sinon attend qu'il y ait <Go> de mémoire libre (wait-mem), puis lance la commande.
+# La pause est revérifiée APRÈS l'attente : le Studio a pu la poser pendant que wait-mem attendait.
 PAUSE=${STUDIO_PAUSE:-/run/studio-pause}
 WAIT_MEM=${WAIT_MEM:-/usr/local/bin/wait-mem}
 go=$1
 shift
-if [ -e "$PAUSE" ]; then
-  echo "Chat en pause : une vidéo ou un objet 3D du Studio est en cours de création, réessaie après." >&2
-  exit 75
-fi
+en_pause() {
+  if [ -e "$PAUSE" ]; then
+    echo "Chat en pause : une vidéo ou un objet 3D du Studio est en cours de création, réessaie après." >&2
+    exit 75
+  fi
+}
+en_pause
 "$WAIT_MEM" "$go" || exit 75
+en_pause
 exec "$@"

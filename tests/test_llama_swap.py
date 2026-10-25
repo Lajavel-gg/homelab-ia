@@ -33,6 +33,17 @@ def test_garde_memoire_refuse_pendant_une_pause(tmp_path):
     assert manque.returncode == 75  # pas assez de mémoire : on ne lance pas
 
 
+def test_garde_memoire_pause_posee_pendant_l_attente(tmp_path):
+    """Le Studio pose la pause pendant que wait-mem attend : le modèle ne doit pas démarrer quand même."""
+    pause = tmp_path / "pause"
+    faux_wait = tmp_path / "wait-mem"
+    faux_wait.write_text(f"#!/bin/sh\necho Studio > '{pause}'\nexit 0\n")
+    faux_wait.chmod(0o755)
+    env = {**os.environ, "STUDIO_PAUSE": str(pause), "WAIT_MEM": str(faux_wait)}
+    r = subprocess.run([GARDE, "80", "echo", "lancé"], env=env, capture_output=True, text=True)
+    assert r.returncode == 75 and "pause" in r.stderr and "lancé" not in r.stdout
+
+
 def port_libre():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

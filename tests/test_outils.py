@@ -124,3 +124,44 @@ def test_lecteur_du_chat_gere_les_creations_archivees():
         page = studio_tool._embed({"format": fmt, "fichier": "/studio/media/" + "a" * 32 + ".mp4"})
         assert "addEventListener('error',absent)" in page and "archivée sur pve2" in page
         assert 'id="dl"' in page and "Toutes mes créations" in page
+
+
+def test_image_refusee_supprimee_du_studio(monkeypatch):
+    """Personne qui paraît mineure dans une scène suggestive : rien n'est affiché ET la création est effacée du Studio."""
+    import studio_tool
+    ids = iter(["a1a1a1a1a1", "b2b2b2b2b2"])
+    supprimes, publies = [], []
+    monkeypatch.setattr(studio_tool, "_image_job", lambda *a: {"comfy": "x.png", "id": next(ids)})
+    monkeypatch.setattr(studio_tool, "_comfy_file", lambda rel: b"png")
+    monkeypatch.setattr(studio_tool, "_verifier", lambda *a: {"ok": False, "trop_jeune": True, "corrections": ["fix"]})
+    monkeypatch.setattr(studio_tool, "_supprimer_job", lambda jid: supprimes.append(jid) or {"ok": True})
+
+    async def publier(*a):
+        publies.append(a)
+    monkeypatch.setattr(studio_tool, "_publier_image", publier)
+    prompt = "A young woman in a bikini on the beach, " + "sunny day with blue sky and waves, " * 3
+    r = asyncio.run(studio_tool.Tools().creer_image(prompt, __messages__=[{"role": "user", "content": "une fille en bikini"}]))
+    assert r.startswith("REFUSÉ") and publies == []
+    assert supprimes == ["a1a1a1a1a1", "b2b2b2b2b2"]
+
+
+def test_supprimer_job_appelle_le_runner(monkeypatch):
+    import studio_tool
+    vu = {}
+
+    class Rep:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a):
+            return b'{"ok": true}'
+
+    def ouvrir(req, timeout=None):
+        vu.update(methode=req.get_method(), url=req.full_url)
+        return Rep()
+    monkeypatch.setattr(studio_tool.urllib.request, "urlopen", ouvrir)
+    assert studio_tool._supprimer_job("a1a1a1a1a1") == {"ok": True}
+    assert vu == {"methode": "DELETE", "url": "http://127.0.0.1:8190/studio/api/jobs/a1a1a1a1a1"}

@@ -33,6 +33,13 @@ def _get(jid):
         return json.load(r)
 
 
+def _supprimer_job(jid):
+    """Supprime une création du Studio (fichiers compris) : DELETE /studio/api/jobs/<id> du runner."""
+    req = urllib.request.Request(f"{RUNNER}/{jid}", method="DELETE")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+
 def _demande_utilisateur(messages, n=3):
     """Les derniers messages de l'utilisateur (la demande + son contexte)."""
     out = []
@@ -61,6 +68,7 @@ def _image_job(prompt, modele, fmt):
         time.sleep(2)
         job = _get(r["id"])
         if job.get("statut") == "terminé":
+            job["id"] = r["id"]
             return job
         if job.get("statut") == "échec":
             raise RuntimeError(job.get("etape"))
@@ -545,7 +553,7 @@ class Tools:
             png = await asyncio.to_thread(_comfy_file, job["comfy"])
             await status("🔎 Je vérifie que l'image correspond à la demande…")
             verdict = await asyncio.to_thread(_verifier, png, demande, reference)
-            essais.append((png, verdict, texte, nom_modele))
+            essais.append((png, verdict, texte, nom_modele, job.get("id")))
             if verdict.get("ok") or essai == 2 or not verdict.get("corrections"):
                 break
             corr = "; ".join(verdict["corrections"])
@@ -553,16 +561,24 @@ class Tools:
 
         # Garde-fou : une personne qui paraît mineure dans une scène suggestive n'est JAMAIS affichée,
         # même si c'est le « meilleur » essai. Idem si la vérification n'a pas pu se faire sur une demande suggestive.
-        essais = [e for e in essais if not e[1].get("trop_jeune")]
+        refuses = [e for e in essais if e[1].get("trop_jeune")]
         if _suggestif(demande, texte, personnages):
-            essais = [e for e in essais if e[1].get("erreur") is None]
+            refuses += [e for e in essais if e[1].get("erreur") is not None and e not in refuses]
+        essais = [e for e in essais if e not in refuses]
+        # Une image refusée ne doit pas non plus rester dans la galerie du Studio : on supprime la création.
+        for e in refuses:
+            if e[4]:
+                try:
+                    await asyncio.to_thread(_supprimer_job, e[4])
+                except Exception as err:  # noqa: BLE001
+                    print(f"studio_tool : suppression de la création refusée {e[4]} impossible : {err}", flush=True)
         if not essais:
             await status("🎨 Image refusée", True)
             return ("REFUSÉ, aucune image affichée : la personne paraissait mineure dans une scène suggestive, ou la "
                     "vérification de l'âge n'a pas pu se faire. Dis-le simplement à l'utilisateur. Ne relance pas creer_image "
                     "pour cette demande.")
         # garde le meilleur essai (le moins de problèmes)
-        png, verdict, texte_final, nom_modele = min(essais, key=lambda e: (not e[1].get("ok"), len(e[1].get("problemes") or [])))
+        png, verdict, texte_final, nom_modele, _ = min(essais, key=lambda e: (not e[1].get("ok"), len(e[1].get("problemes") or [])))
         await _publier_image(png, __request__, __user__, __chat_id__, __message_id__, __event_emitter__)
         await status(f"🎨 Image prête ({nom_modele}) ✅", True)
         if verdict.get("ok"):

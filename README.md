@@ -74,6 +74,7 @@ correcteur/       dictionnaire des sons (Lexique 3 + espeak-ng), apprentissage n
 mail/             serveur MCP en lecture seule pour la boîte mail (jamais d'envoi ni de suppression)
 proxmox-lxc/      configs des conteneurs : HAProxy, Vaultwarden, wg-easy, DNS dynamique OVH, mise à jour de LanguageTool
 sauvegardes/      sauvegarde restic append-only et ménage côté serveur
+opencode/         skills (fiches de méthode) données à l'agent de code OpenCode
 ```
 
 ## Matériel

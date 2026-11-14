@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16.10-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_DB: litellm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "litellm"]
+      interval: 10s
+      retries: 10
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.83.14-stable
+    restart: unless-stopped
+    env_file: .env
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+    ports:
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      db:
+        condition: service_healthy
+  tls:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    ports:
+      - "4443:4443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls:/tls:ro
+    depends_on:
+      - litellm
+

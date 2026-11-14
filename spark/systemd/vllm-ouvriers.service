@@ -1,0 +1,27 @@
+[Unit]
+# --enforce-eager obligatoire (bug vLLM #55406, compilation qui plante quand le chef génère) : voir /opt/ai-stack/DECISIONS.md
+Description=Ouvriers Nemotron 3.5 Lightning 30B-A3B NVFP4 (vLLM, 127.0.0.1:8092, noms ouvrier + lightning-30b, 32 agents, sans compilation : enforce-eager car la compilation plante quand le chef génère en même temps)
+After=vllm-chef.service docker.service
+Requires=docker.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStartPre=/usr/local/bin/wait-mem 58
+ExecStartPre=-/usr/bin/docker rm -f ouvriers
+ExecStart=/usr/bin/docker run --rm --name ouvriers --gpus all --ipc=host --network host --oom-score-adj 900 \
+  -e VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel -e VLLM_NO_USAGE_STATS=1 -e DO_NOT_TRACK=1 \
+  -v /opt/models/hf:/models:ro -v /opt/ai-stack/vllm-cache:/root/.cache \
+  vllm/vllm-openai:nightly-77154ca6116ae34cbfe314beef1016bde9b63989 /models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  --served-model-name ouvrier lightning-30b --host 127.0.0.1 --port 8092 --trust-remote-code \
+  --moe-backend marlin --kv-cache-dtype fp8 --enable-prefix-caching \
+  --gpu-memory-utilization 0.40 --max-model-len 131072 --max-num-seqs 32 --max-num-batched-tokens 8192 \
+  --mamba-backend flashinfer --mamba-cache-mode align \
+  --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder --enable-auto-tool-choice --enforce-eager
+ExecStop=/usr/bin/docker stop -t 30 ouvriers
+Restart=always
+RestartSec=60
+TimeoutStartSec=900
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

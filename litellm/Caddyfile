@@ -1,0 +1,14 @@
+# Chiffrement (HTTPS) devant LiteLLM : certificat signé par la CA locale du Caddy du Spark (déjà connue des VM).
+{
+	auto_https off
+	admin off
+}
+https://:4443 {
+	tls /tls/litellm.crt /tls/litellm.key
+	reverse_proxy litellm:4000 {
+		flush_interval -1
+		transport http {
+			read_timeout 30m
+		}
+	}
+}

@@ -8,7 +8,8 @@
 
 ![DGX Spark](https://img.shields.io/badge/NVIDIA-DGX%20Spark%20GB10-76B900?logo=nvidia&logoColor=white)
 ![Open WebUI](https://img.shields.io/badge/Open%20WebUI-0.12-black)
-![llama.cpp](https://img.shields.io/badge/llama.cpp-CUDA-blue)
+![vLLM](https://img.shields.io/badge/vLLM-NVFP4-blue)
+![LiteLLM](https://img.shields.io/badge/LiteLLM-passerelle-6E56CF)
 ![ComfyUI](https://img.shields.io/badge/ComfyUI-workflows-orange)
 ![Proxmox](https://img.shields.io/badge/Proxmox%20VE-cluster-E57000?logo=proxmox&logoColor=white)
 
@@ -22,7 +23,9 @@ Tout passe par **[Open WebUI](https://github.com/open-webui/open-webui)**, comme
 
 | Assistant | Ce qu'il fait | Code |
 |---|---|---|
-| **Chat** | Un grand modèle (Qwen3.8-Flash-Next) servi par llama.cpp, avec recherche web (SearXNG), voix (Whisper / TTS) et un exécuteur de code (Jupyter) | [`spark/`](spark/) |
+| **Chat** | Le « chef » : Qwen3.8-27B en NVFP4 servi par vLLM (MTP), avec recherche web (SearXNG), voix (Whisper / TTS) et un exécuteur de code (Jupyter) | [`spark/systemd/vllm-chef.service`](spark/systemd/vllm-chef.service) |
+| **Ouvriers** | Jusqu'à 32 agents en même temps : Nemotron 3.5 Lightning 30B-A3B (NVFP4) sur un 2ᵉ vLLM, pour le code et les tâches en parallèle | [`spark/systemd/vllm-ouvriers.service`](spark/systemd/vllm-ouvriers.service) |
+| **Code (OpenCode)** | Une équipe : le chef réfléchit avec l'utilisateur et propose un plan sans rien toucher, puis confie le code aux ouvriers et vérifie leur travail avant de résumer | [`opencode/`](opencode/) |
 | **Studio** | Images, vidéos (texte→vidéo, image→vidéo, vidéos longues en plusieurs scènes) et modèles 3D via ComfyUI. Une fenêtre permet de choisir **durée et qualité** avec le **temps estimé** avant de lancer. Une IA de vision **vérifie chaque image** et relance si elle ne correspond pas à la demande. | [`openwebui/outils/studio_tool.py`](openwebui/outils/studio_tool.py), [`studio/`](studio/) |
 | **Correcteur** | Pensé pour la dyslexie et l'écriture « au son » : corrige un français écrit phonétiquement (« sa allaire de focntionner » → « ça a l'air de fonctionner »), avec un **carnet personnel** qui apprend chaque nuit, un **dictionnaire des sons** (Lexique 3 + espeak-ng), **LanguageTool**, et la **traduction** (« corrige et traduis en anglais : … ») | [`correcteur/`](correcteur/), [`openwebui/filtres/correcteur_memoire.py`](openwebui/filtres/correcteur_memoire.py) |
 | **Admin Proxmox** | Pilote le cluster Proxmox en langage naturel : état, démarrer/arrêter, sauvegardes, créer un conteneur (l'IP suit l'ID), avec **confirmation** avant toute action risquée et des machines **protégées** | [`openwebui/outils/proxmox_tool.py`](openwebui/outils/proxmox_tool.py) |
@@ -35,8 +38,12 @@ flowchart LR
     U[Téléphone / PC] -->|maison ou VPN WireGuard| P[HAProxy<br/>LXC Proxmox]
     U -->|réseau local| C[Caddy<br/>HTTPS + mot de passe]
     C --> W[Open WebUI]
+    VM[VM : appli, Hermes,<br/>OpenCode, bot mail] -->|HTTPS, une clé par VM| LL[LiteLLM<br/>VM Proxmox]
+    LL -->|porte réservée| C
     subgraph Spark[NVIDIA DGX Spark]
-        W --> L[llama.cpp<br/>Qwen3.8-Flash-Next]
+        W --> L[vLLM chef<br/>Qwen3.8-27B NVFP4]
+        C --> L
+        C --> O[vLLM ouvriers<br/>Lightning 30B NVFP4]
         W --> S[Studio runner] --> CF[ComfyUI<br/>images · vidéo · 3D]
         W --> X[SearXNG]
         W --> V[Whisper / TTS]
@@ -56,7 +63,10 @@ flowchart LR
 
 ## Points techniques intéressants
 
-- **Un seul gros modèle partagé.** Le chat, le Correcteur, le trading et la vérification d'images utilisent le même serveur llama.cpp, avec décodage spéculatif (MTP) et cache KV en q8_0. Les vidéos ont besoin de toute la mémoire : le Studio **arrête le chat pendant le rendu puis le relance**, et les autres services attendent qu'il revienne.
+- **Deux vLLM sur un seul GPU, et le bug qui va avec.** Le chef et les ouvriers partagent le GB10. Dès que le chef génère, les ouvriers *compilés* (torch.compile) plantent (Xid 31) en 15 s. Bissection complète, essais sur la version stable, diagnostic `CUDA_LAUNCH_BLOCKING` : les ouvriers restent en `--enforce-eager` (coût mesuré : −6 à −8 % à 8-16 agents). Tout est dans [`docs/vllm-deux-instances.md`](docs/vllm-deux-instances.md), avec les scripts de test ([`spark/bancs/`](spark/bancs/)).
+- **Une seule porte vers les IA : LiteLLM.** Les VM ne parlent plus au Spark directement : elles passent par une VM [LiteLLM](litellm/) en HTTPS, avec une clé par VM qu'on peut couper sans toucher aux autres.
+- **Le chef relit les ouvriers.** Mesuré sur de vraies tâches : un ouvrier seul dans OpenCode a eu 3/5 et 1/5 (oublis, fichier demandé effacé) ; avec le chef qui confie puis vérifie, 4/5 et 4/5. Une règle écrite (« appelle le relecteur ») était ignorée par l'ouvrier : c'est donc le chef qui reçoit la demande ([`opencode/agents/`](opencode/agents/)).
+- **Un seul gros modèle partagé (avant novembre 2026).** Le chat, le Correcteur, le trading et la vérification d'images utilisent le même serveur llama.cpp, avec décodage spéculatif (MTP) et cache KV en q8_0. Les vidéos ont besoin de toute la mémoire : le Studio **arrête le chat pendant le rendu puis le relance**, et les autres services attendent qu'il revienne.
 - **Démarrage fiable du GPU.** Après une coupure de courant, le GPU n'est pas toujours prêt quand les services démarrent : [`attendre-gpu`](spark/scripts/attendre-gpu) et [`wait-mem`](spark/scripts/wait-mem) les font patienter au lieu de démarrer en mode CPU ou de saturer la mémoire.
 - **Correctif llama.cpp.** Réponses vides avec les appels d'outils en parallèle : correctif de la [PR #28058](https://github.com/ggml-org/llama.cpp/pull/28058) appliqué à la main → 0 réponse vide sur 8 requêtes simultanées, sans perte de vitesse.
 - **Fréquence GPU plafonnée** ([`gpu-limite.service`](spark/systemd/gpu-limite.service)) pour éviter la surchauffe lors des longs rendus.
@@ -66,6 +76,10 @@ flowchart LR
 ## Contenu du dépôt
 
 ```
+litellm/          passerelle LiteLLM (une clé par VM, HTTPS via Caddy) devant les deux vLLM du Spark
+docs/             décisions techniques (deux vLLM sur un GPU)
+spark/bancs/      scripts de charge et de vitesse pour vLLM
+opencode/agents/  agents OpenCode : chef d'équipe, codeur, réflexion, relecteur
 spark/            docker-compose (Open WebUI, SearXNG, Whisper/TTS, Jupyter, ComfyUI, Caddy), services systemd, scripts
 openwebui/outils  outils Open WebUI : Studio, Proxmox, Trading
 openwebui/filtres filtres Open WebUI : Correcteur, recherche web forcée, outils du modèle toujours actifs

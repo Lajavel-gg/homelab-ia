@@ -1,0 +1,27 @@
+[Unit]
+Description=Chef d'équipe Qwen3.8-27B NVFP4 (vLLM, 127.0.0.1:8090, noms qwen3.8-flash-next + chef)
+After=network-online.target docker.service nvidia-persistenced.service
+Requires=docker.service
+Conflicts=llama-flashnext.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStartPre=/usr/local/bin/attendre-gpu
+ExecStartPre=/usr/local/bin/wait-mem 45
+ExecStartPre=-/usr/bin/docker rm -f chef
+ExecStart=/usr/bin/docker run --rm --name chef --gpus all --ipc=host --network host --oom-score-adj 500 \
+  -v /opt/models/hf:/models:ro -v /opt/ai-stack/vllm-cache:/root/.cache \
+  -e VLLM_USE_V2_MODEL_RUNNER=1 vllm/vllm-openai:nightly-77154ca6116ae34cbfe314beef1016bde9b63989 /models/Qwen3.8-27B-NVFP4 \
+  --served-model-name qwen3.8-flash-next chef --host 127.0.0.1 --port 8090 \
+  --gpu-memory-utilization 0.30 --max-model-len 131072 --max-num-seqs 4 --max-num-batched-tokens 8192 \
+  --kv-cache-dtype fp8 --enable-prefix-caching --mamba-cache-mode align \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+  --reasoning-parser qwen3 --tool-call-parser qwen3_xml --enable-auto-tool-choice
+ExecStop=/usr/bin/docker stop -t 30 chef
+Restart=always
+RestartSec=30
+TimeoutStartSec=400
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

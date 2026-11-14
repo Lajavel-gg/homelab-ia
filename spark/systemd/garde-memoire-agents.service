@@ -1,0 +1,10 @@
+[Unit]
+Description=Garde mémoire : arrête les ouvriers vLLM sous 5 Go libres
+
+[Service]
+ExecStart=/opt/ai-stack/agents/garde-memoire.sh
+Restart=always
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=multi-user.target

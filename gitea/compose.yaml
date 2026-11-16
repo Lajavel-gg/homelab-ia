@@ -1,0 +1,49 @@
+# Gitea : le bac à sable des IA (voir README.md). Une VM Proxmox à part, comme LiteLLM.
+services:
+  gitea:
+    image: gitea/gitea:1.27.3-rootless
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__DOMAIN: ${GITEA_DOMAINE}
+      GITEA__server__ROOT_URL: https://${GITEA_DOMAINE}:3443/
+      GITEA__server__HTTP_PORT: "3000"
+      # Pas de SSH : tout passe en HTTPS avec des clés (une par compte), une seule porte à surveiller.
+      GITEA__server__DISABLE_SSH: "true"
+      GITEA__server__START_SSH_SERVER: "false"
+      # Personne ne s'inscrit seul, rien n'est visible sans compte, tout repo est privé.
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__service__REQUIRE_SIGNIN_VIEW: "true"
+      GITEA__service__DEFAULT_KEEP_EMAIL_PRIVATE: "true"
+      GITEA__repository__DEFAULT_PRIVATE: private
+      GITEA__repository__FORCE_PRIVATE: "true"
+      # Les repos viennent de GitHub par synchro_github.py, pas par l'outil de migration de Gitea.
+      GITEA__migrations__ALLOW_LOCALNETWORKS: "false"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__security__SECRET_KEY: ${GITEA_SECRET_KEY}
+      GITEA__security__INTERNAL_TOKEN: ${GITEA_INTERNAL_TOKEN}
+      GITEA__security__PASSWORD_HASH_ALGO: argon2
+      # Gitea Actions (étape 3 du plan : tests lancés à chaque push des IA). Le runner viendra plus tard.
+      GITEA__actions__ENABLED: "true"
+      # Pas d'appel à l'extérieur pour vérifier les mises à jour.
+      # (« _0X2E_ » = le point de [cron.update_checker], comme le demande Gitea)
+      GITEA__cron_0X2E_update_checker__ENABLED: "false"
+      GITEA__log__LEVEL: Warn
+    volumes:
+      - ./data:/var/lib/gitea
+      - ./config:/etc/gitea
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      # Seulement pour la VM elle-même (synchro_github.py) ; le réseau passe par Caddy en HTTPS.
+      - "127.0.0.1:3000:3000"
+  tls:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    ports:
+      - "3443:3443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls:/tls:ro
+    depends_on:
+      - gitea

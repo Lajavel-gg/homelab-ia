@@ -65,6 +65,46 @@ copies `git worktree`, le premier qui passe ses tests et `verifier-tests` gagne 
 - Aucun ouvrier ne s'est trompé sur ces tâches (médiane, mention) : le renvoi d'erreur n'est testé pour l'instant
   qu'avec un faux OpenCode.
 
+#### 16/11 : une tâche difficile, 8 essais (architecte et nombre d'ouvriers)
+
+Tâche : un groupe de travailleurs en Go (plafond de travaux en même temps, délai par travail, fermeture propre),
+choisie parce qu'un ouvrier peut s'y tromper. Ouvriers Qwen3.6-35B-A3B, 3 essais chacun, limite fixe de 45 min par
+essai. Qualité mesurée par un jury de tests cachés (gardé hors de ce dépôt, jamais vu par les agents) : 5 pièges
+(canal fermé, goroutine restante, contexte jamais annulé, `Fermer` qui n'attend pas, plafond dépassé) + 1 bonus,
+chaque test seul, 50 fois avec `-race`. Les tests de chaque architecte ont aussi été lancés sur une version de
+référence juste (chaque test seul, 20 fois) et sur 7 versions cassées exprès.
+
+| Essai | Architecte | Ouvriers | Total | Gagnant | Jury caché (tests réussis 50/50) |
+|---|---|---|---|---|---|
+| 1 | Qwen3.8 (chef), 29,6 min | 2 | 118 min | oui, 2e essai | 3 / 6 |
+| 2 | Qwen3.6, 1,9 min | 1 | 47 min | non | pas de code |
+| 3 | Qwen3.8 (chef), 24,6 min | 2 | 52 min | oui, 1er essai | 4 / 6 |
+| 4 | Qwen3.6, 1,5 min | 1 | 69 min | non | pas de code |
+| 5 | préparation de l'essai 1 | 1 | 41 min | oui, 3e essai | 5 / 6 |
+| 6 | préparation de l'essai 1 | 3 | 36 min | oui, 1er essai | 2 / 6 |
+| 7 | préparation de l'essai 1 | 1 | 38 min | non | pas de code |
+| 8 | préparation de l'essai 1 | 3 | 86 min | non | pas de code |
+
+| Préparation | Tests faux ou fragiles sur la référence | Pièges attrapés par un test juste |
+|---|---|---|
+| Qwen3.8, essai 1 | 2 sur 8 (échouent 10 et 25 % du temps) | 1 sur 5 |
+| Qwen3.8, essai 3 | 1 sur 8 (40 %) | 3 sur 5, plus la moitié de « Fermer qui n'attend pas » |
+| Qwen3.6, essai 2 | 6 sur 11 (5 échouent toujours) | 1 sur 5, plus une moitié |
+| Qwen3.6, essai 4 | 7 sur 14 (tous échouent toujours) | 1 sur 5, plus une moitié |
+
+- Les 4 préparations passent `verifier-tests --doivent-echouer` : ce contrôle ne voit pas un test faux.
+- L'architecte Qwen3.6 prépare 15 fois plus vite, mais la moitié de ses tests sont faux : aucun gagnant possible.
+- Un test verrouillé fragile (25 % d'échecs sur une version juste) a fait refuser 4 essais d'ouvriers qui étaient
+  « tout vert ».
+- Aucun code final ne passe tout le jury. Les 4 ratent le même piège : un 2e `Fermer` appelé en même temps
+  n'attend pas. Aucun test d'architecte ne le vérifiait.
+- `verifier-tests --mutation` n'a rien pu muter dans les 8 essais (aucun test ne passe à chaque fois).
+- 1 contre 3 ouvriers : un gagnant sur 2 essais dans les deux cas ; 3 ouvriers consomment 17 à 60 fois plus de jetons
+  (cache de préfixe : 80 % avec 1 ouvrier, 94 % avec 3).
+- Durée des essais réussis : médiane 17 min, maximum 30 min ; premier « tout vert » au plus tard à 36 min.
+- 7 boucles de réflexion sur 9 s'arrêtent seules au plafond de 32 000 jetons (environ 5 min) ; le plus long silence
+  d'un ouvrier gagnant est de 5,4 min.
+
 Constats : le chef passe 70 à 77 % de son temps à réfléchir (Qwen3.8-27B est réglé par défaut sur une
 réflexion très élevée) ; les ouvriers ne sont pas assez fiables pour travailler sans être revérifiés.
 En cours : essai d'un autre modèle d'ouvrier (Qwen3.6-35B-A3B NVFP4) et d'une réflexion plus courte pour le chef.

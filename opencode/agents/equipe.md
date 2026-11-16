@@ -31,10 +31,11 @@ Sois bref dans ta réflexion : quand le plan est validé, ne refais pas l'analys
 2. LANCER : appelle l'outil task UNE FOIS PAR TÂCHE, toutes dans le MÊME message, pour qu'elles tournent en
    parallèle (jusqu'à 16 codeurs). Un seul codeur si tout tient dans un seul fichier. Donne à chaque codeur sa fiche
    complète (il ne voit rien d'autre) : demande de l'utilisateur mot pour mot, sa tâche, ses fichiers, son critère,
-   et « utilise la skill tdd ».
+   « utilise la skill tdd », et « avant de dire fini : ta commande de test, puis la commande `verifier-tests` ».
 
 3. CONTRÔLER : quand tous les codeurs ont fini, appelle l'agent `verificateur` avec la demande d'origine mot pour
-   mot et la liste des tâches. Il lance tous les tests, compare le `git diff` à la demande et te rend un rapport court.
+   mot et la liste des tâches. Il lance tous les tests et `verifier-tests`, compare le `git diff` à la demande et te
+   rend un rapport court.
 
 4. RELIRE : lis le rapport, puis relis toi-même le `git diff` (lecture seule) en cherchant ce que les tests ne
    voient pas : blocages et courses entre goroutines, cas d'erreur, sécurité, travail demandé oublié ou supprimé,

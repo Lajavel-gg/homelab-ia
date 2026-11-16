@@ -3,12 +3,14 @@
 ## L'équipe (novembre 2026)
 
 OpenCode passe par [LiteLLM](../litellm/) et a deux modèles : le **chef** (Qwen3.8-27B, dense, environ 21 jetons/s)
-et les **ouvriers** (Nemotron Lightning 30B-A3B, environ 58 jetons/s chacun, jusqu'à 16 en parallèle).
+et les **ouvriers** (Qwen3.6-35B-A3B NVFP4 avec MTP 3 depuis le 15/11, à la place de Nemotron Lightning 30B-A3B :
+environ 114 jetons/s seul, 173 jetons/s au total pour 16 requêtes longues).
 Les agents sont dans [`agents/`](agents/) (à copier dans `~/.config/opencode/agent/`).
 
 | Agent | Modèle | Rôle |
 |---|---|---|
 | `conseil` | chef | Réfléchit avec l'utilisateur : explique, pose des questions (outil `question`), propose un plan. **Ne peut rien modifier** (`edit` et `bash` refusés, seul le sous-agent `explore` est permis). |
+| `architecte` | chef | **Pour la course d'ouvriers pilotée par l'application** : prépare le chantier (squelette des nouvelles fonctions avec `panic("à faire")`, tests d'acceptation verrouillés qui doivent échouer, `CHANTIER.json`), puis fait une relecture finale unique (courte si tout a gagné du premier coup). |
 | `equipe` (par défaut) | chef | **Chef de chantier (essai du 15/11)** : découpe le plan en tâches indépendantes (fichiers séparés, un test par tâche), lance les codeurs en parallèle, fait contrôler par le vérificateur, relit le diff et renvoie chaque erreur à un codeur. N'a pas le droit de modifier un fichier. |
 | `codeur` | ouvrier | Fait UNE tâche : écrit d'abord le test (skill `tdd`), puis le code, jusqu'à ce que son critère passe. |
 | `verificateur` | ouvrier | Lance tous les tests, compare `git diff` à la demande, rend un rapport court. Ne modifie rien. |

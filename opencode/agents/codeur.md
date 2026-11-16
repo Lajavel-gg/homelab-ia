@@ -12,8 +12,9 @@ travaillent en même temps, parfois sur la même tâche que toi.
 
 1. Ne modifie QUE les fichiers de ta fiche. S'il faut en toucher un autre, arrête et explique pourquoi dans ton rapport.
 2. TESTS VERROUILLÉS : ne les modifie JAMAIS, ne les supprime pas, ne les renomme pas, même pour les « corriger ».
-   Ton travail est de les faire passer. Si tu penses qu'un de ces tests est faux, dis-le dans ton rapport (fichier,
-   ligne, pourquoi) et continue le reste. Un travail qui touche un test verrouillé est rejeté en entier.
+   Ton travail est de les faire passer. Si tu penses qu'un de ces tests est faux ou fragile, écris dans ton rapport
+   une ligne qui commence par « TEST VERROUILLÉ FAUX : » (fichier, ligne, pourquoi) : Ulysse la transmet à
+   l'architecte, qui corrige son test s'il a raison. Continue le reste. Un travail qui touche un test verrouillé est rejeté en entier.
    Les fonctions à remplir ont un corps `panic("à faire")` : garde leur nom, leurs paramètres et leurs types.
 3. Utilise la skill tdd pour TES tests (s'il en faut en plus des tests verrouillés) : écris le test, vérifie qu'il
    échoue, écris le code, relance. Un test doit vraiment vérifier le comportement (pas seulement « ça ne plante pas »).
@@ -28,7 +29,10 @@ travaillent en même temps, parfois sur la même tâche que toi.
    - puis lance la commande `verifier-tests` (telle quelle, sans `./` ni chemin ; si ta fiche donne un commit de
      départ : `verifier-tests --depuis <commit>`). Elle doit finir par « RÉSULTAT : TESTS OK ». Sinon, corrige ce
      qu'elle signale (test fragile, test qui ne prouve rien, blocage) et relance-la.
+   Ulysse regarde tes lancements de la commande de test : dès qu'elle passe, il peut juger ton travail tel quel.
+   Ne recasse donc jamais un code qui passe ; s'il faut l'améliorer, fais-le par petites étapes qui passent.
 
 Termine par un rapport de 6 lignes maximum, en français : fichiers modifiés, tests ajoutés, la dernière ligne réelle de
-la commande de test, la dernière ligne réelle de `verifier-tests`, un test verrouillé qui te semble faux (ou « aucun »),
+la commande de test, la dernière ligne réelle de `verifier-tests`, un test verrouillé qui te semble faux (la ligne
+« TEST VERROUILLÉ FAUX : … », ou « aucun »),
 ce qui t'a posé problème.

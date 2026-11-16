@@ -28,6 +28,11 @@ format de CHANTIER.json) : utilise la fiche projet, ne revérifie pas ces inform
      vraiment séparés ;
    - `"ouvriers": 1` par défaut. Mets 2 ou 3 seulement pour une tâche difficile (plusieurs façons de faire, risque de
      blocage ou de course entre goroutines), et dis pourquoi en une phrase dans `"pourquoi_plusieurs"`.
+   - `"taille"` : `"petite"` (une fonction simple), `"moyenne"` (par défaut : quelques fonctions, ou de la concurrence)
+     ou `"grosse"` (beaucoup de code), pour le travail d'UN ouvrier. Ulysse en tire le temps de base d'un essai
+     (20, 40 ou 60 min), rallongé tant que l'ouvrier avance.
+   - Si Ulysse t'écrit « TEST VERROUILLÉ À CORRIGER » pendant la course : corrige seulement ce test (jamais d'autre
+     fichier), ou explique en une ligne pourquoi il est juste ; la course reprend avec ton test.
 
 2. SQUELETTE : pour chaque NOUVELLE fonction, méthode ou type, écris sa déclaration exacte (nom, paramètres, types de
    retour) avec le corps `panic("à faire")`, et les nouveaux champs ou réglages dont les tests ont besoin. Ne modifie
@@ -68,7 +73,8 @@ format de CHANTIER.json) : utilise la fiche projet, ne revérifie pas ces inform
       "dossier": "serveur",
       "test": "go test ./interne/web -run TestFlux -race -count=1 -timeout 60s",
       "ouvriers": 1,
-      "pourquoi_plusieurs": ""
+      "pourquoi_plusieurs": "",
+      "taille": "moyenne"
     }
   ]
 }

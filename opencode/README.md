@@ -30,6 +30,41 @@ Tâche : délai d'écriture glissant + ping SSE toutes les 30 s + quota d'images
 | Chef qui confie à un codeur puis corrige lui-même | 96 min | 55 tours du chef (54 min de modèle, dont 70 % de réflexion), 1 codeur (284 petites étapes). Le chef rattrape 4 erreurs du codeur ; une course à la fermeture du flux reste, trouvée à la relecture humaine. |
 | Chef de chantier (agents actuels) | 2 h | 16 tours du chef, 3 codeurs en parallèle. Les codeurs disent « fini » avec un ping à 30 ms au lieu de 30 s et une fonction jamais écrite ; le chef les renvoie. Il trouve seul la course à la fermeture. Meilleure qualité, mais plus lent. |
 
+#### 15 et 16/11 : réglages du chef, puis course d'ouvriers
+
+Même tâche, même plan, même commit de départ ; ouvriers Qwen3.6-35B-A3B + MTP 3. Qualité vérifiée de la même façon
+sur chaque copie : `go vet`, `go test -race`, et `verifier-tests --mutation`.
+
+| Essai | Durée | Tours du chef | Réflexion du chef | Renvois aux ouvriers | Morceaux qu'aucun test ne vérifie |
+|---|---|---|---|---|---|
+| A : chef de chantier, réglage par défaut | 36 min | 17 | 78 % | 0 | 3 |
+| A2 : le même, refait | 44 min | 21 | 72 % | 1 | 5 |
+| B : chef en réflexion « medium » | 78 min | 29 | 80 % | 1 | 2 |
+| C : « medium » + script de vérification des tests | 68 min | 38 | 79 % | 1 | 4 |
+| D : C refait | 69 min | 30 | 72 % | 2 | 3 |
+
+- La durée varie d'environ 20 % d'un essai à l'autre : il faut au moins 2 essais par réglage.
+- « medium » ne réduit pas la réflexion (72 à 80 %) et rend le chef 2 fois plus lent (plus de tours, résumés forcés).
+  Vérifié : le réglage arrive bien au modèle (38 jetons d'instructions en moins dans chaque requête).
+- Les 5 versions sont justes (`-race` vert, aucun test fragile), mais aucune ne teste l'arrêt des goroutines :
+  d'où l'obligation de goleak dans les tests de l'architecte.
+- Le script a été mal lancé par les ouvriers (ils cherchaient `./verifier-tests.sh`) : il est devenu une vraie
+  commande, [`verifier-tests`](#la-commande-verifier-tests).
+
+**Course d'ouvriers pilotée par l'application** (l'architecte prépare ; l'application fait courir les ouvriers dans des
+copies `git worktree`, le premier qui passe ses tests et `verifier-tests` gagne ; l'architecte relit) :
+
+| Essai | Architecte (préparer) | Course | Relecture | Total |
+|---|---|---|---|---|
+| 1 tâche, 1 ouvrier | 8,8 min | 24 s | non mesurée | environ 9 min sans la relecture |
+| 2 tâches, 2 ouvriers chacune (n° 1) | 8,2 min (11 tours, 13 000 jetons) | 41 s | 5,6 min | 14,5 min |
+| 2 tâches, 2 ouvriers chacune (n° 2) | 15,7 min (14 tours, 24 000 jetons) | 40 s | 7,7 min | 24 min |
+
+- L'architecte prend 95 % du temps ; sa durée suit le nombre de jetons qu'il écrit (environ 25 par seconde, les trois
+  quarts en réflexion). Ajouté depuis : une fiche projet préparée par l'application, et une relecture courte.
+- Aucun ouvrier ne s'est trompé sur ces tâches (médiane, mention) : le renvoi d'erreur n'est testé pour l'instant
+  qu'avec un faux OpenCode.
+
 Constats : le chef passe 70 à 77 % de son temps à réfléchir (Qwen3.8-27B est réglé par défaut sur une
 réflexion très élevée) ; les ouvriers ne sont pas assez fiables pour travailler sans être revérifiés.
 En cours : essai d'un autre modèle d'ouvrier (Qwen3.6-35B-A3B NVFP4) et d'une réflexion plus courte pour le chef.

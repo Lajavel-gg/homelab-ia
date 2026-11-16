@@ -40,6 +40,42 @@ OpenCode tourne dans une VM Proxmox isolée et écrit le code des projets étape
 
 Une *skill* est une fiche de méthode (`SKILL.md`) que l'agent lit seulement quand la tâche en a besoin. OpenCode les cherche dans `~/.config/opencode/skills/<nom>/` (toute la machine) ou `.opencode/skills/<nom>/` (un projet). Vérifier qu'elle est vue : `opencode debug skill`.
 
+## La commande `verifier-tests`
+
+[`scripts/verifier-tests`](scripts/verifier-tests) (Python 3, sans dépendance) vérifie que les tests ajoutés ou
+modifiés prouvent vraiment quelque chose. Installée comme une commande : `~/.local/bin/verifier-tests`.
+
+```
+verifier-tests [--depuis COMMIT] [--dossier CHEMIN] [--mutation] [--json] [--fois N]
+```
+
+- **Rapide (par défaut)** : les nouveaux tests sont lancés sur l'ancien code (ils doivent échouer, sinon ils ne
+  prouvent rien), puis 20 fois avec `-race` dans le vrai dossier, avec des limites de temps (2 min / 5 min).
+- **`--mutation` (lent)** : retire un seul morceau modifié depuis le commit de départ à la fois, sans les commentaires
+  ni la mise en forme. Si ça compile et que les tests passent encore, aucun test ne vérifie ce morceau.
+- **`--json`** : `statut` (`ok`, `probleme`, `erreur`) et, pour chaque problème : `type` (`echec`, `fragile`,
+  `non_verifie`, `impossible`), `bloquant`, `fichier`, `ligne`, `test`, `message`. `impossible` (le test ne compile
+  pas sur l'ancien code) n'est pas bloquant.
+- **Codes de retour** : 0 = tout va bien, 1 = problème trouvé, 2 = la vérification n'a pas pu tourner
+  (dossier introuvable, pas un dépôt git, langage pas encore géré…).
+
+Le dossier de travail n'est jamais modifié : tout se passe dans des copies temporaires (`git worktree`), supprimées
+même en cas d'erreur. Avec `--mutation`, seuls les tests qui passent à chaque fois servent, et les paquets où un test
+échoue déjà sont sautés (le problème est déjà signalé). Limites de temps réglables : `VERIFIER_LIMITE_ANCIEN` (2m),
+`VERIFIER_LIMITE_FRAGILE` (5m).
+
+**Test du script.** [`scripts/demo-verifier-tests/`](scripts/demo-verifier-tests/) est un petit projet Go (`avant/` =
+commit de départ, `apres/` = travail à vérifier) avec un cas par paquet : une vraie correction bien testée avec un
+commentaire changé et des lignes réalignées (rien à signaler), un test qui passait déjà avant, un test qui échoue,
+un test fragile, un test qui bloque, un morceau qu'aucun test ne vérifie. `python3 scripts/test_verifier_tests.py`
+recrée le projet et vérifie les résultats attendus, en mode rapide et `--mutation` (environ 1 minute, il faut git et go).
+
+**Langages.** Le langage est détecté par son fichier de projet (`go.mod`, `package.json`, `pyproject.toml`,
+`Cargo.toml`). Seul Go est géré pour l'instant ; les autres affichent « langage pas encore géré ». Outils prévus pour
+la mutation : [universalmutator](https://github.com/agroce/universalmutator) (tous langages),
+[mutmut](https://github.com/boxed/mutmut) (Python), [Stryker](https://stryker-mutator.io/) (JavaScript/TypeScript),
+[cargo-mutants](https://github.com/sourcefrog/cargo-mutants) (Rust).
+
 ## Skills installées
 
 | Skill | Rôle | Origine |

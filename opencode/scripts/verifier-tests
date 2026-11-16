@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""verifier-tests : vérifie que les tests ajoutés ou modifiés prouvent vraiment quelque chose.
+
+Usage : verifier-tests [--depuis COMMIT] [--dossier CHEMIN] [--mutation] [--json] [--fois N]
+
+Mode rapide (par défaut) :
+  1. ANCIEN CODE : les nouveaux tests sont lancés sur le code du commit de départ (copie temporaire, git worktree).
+     Un test qui passe déjà avant la correction ne prouve rien (non_verifie). S'il ne compile pas sur l'ancien
+     code, on ne peut pas le vérifier ainsi (impossible : avertissement, pas bloquant).
+  2. FRAGILE : les tests concernés sont lancés N fois (20 par défaut) avec -race, avec des limites de temps.
+     Échec à chaque fois : echec. Échec de temps en temps : fragile. Blocage, panique, course de données : echec.
+Avec --mutation (lent) :
+  3. MORCEAU NON VÉRIFIÉ : dans une copie du nouveau code, on retire un seul morceau modifié à la fois (seulement les
+     lignes changées depuis le commit de départ, sans les commentaires ni la mise en forme). Si ça compile et que les
+     tests passent encore, aucun test ne vérifie ce morceau (non_verifie).
+
+Avec --doivent-echouer (pour l'architecte, avant le travail des ouvriers) :
+  chaque test nouveau ou modifié est lancé seul sur le code actuel (le squelette) : il doit compiler et ÉCHOUER.
+  Un test qui passe déjà ne prouve rien (non_verifie) ; un test qui ne compile pas : impossible (bloquant ici).
+
+Le dossier de travail n'est jamais modifié ; les copies temporaires sont supprimées même en cas d'erreur.
+Langages : Go seulement pour l'instant (go.mod). Les autres sont détectés et signalés « langage pas encore géré ».
+Codes de retour : 0 = tout va bien, 1 = problème trouvé, 2 = le script n'a pas pu tourner.
+"""
+import argparse, collections, json, os, re, shutil, signal, subprocess, sys, tempfile
+
+# limites de temps de go test, par paquet (réglables, ex. pour les tests du script lui-même)
+LIMITE_ANCIEN = os.environ.get("VERIFIER_LIMITE_ANCIEN", "2m")    # tests sur l'ancien code et pendant la mutation
+LIMITE_FRAGILE = os.environ.get("VERIFIER_LIMITE_FRAGILE", "5m")  # pour les N passages avec -race
+MANIFESTES = {"go.mod": "Go", "package.json": "JavaScript/TypeScript", "pyproject.toml": "Python", "Cargo.toml": "Rust"}
+EXTENSIONS = {".go": "Go", ".js": "JavaScript/TypeScript", ".jsx": "JavaScript/TypeScript", ".mjs": "JavaScript/TypeScript",
+              ".ts": "JavaScript/TypeScript", ".tsx": "JavaScript/TypeScript", ".py": "Python", ".rs": "Rust"}
+
+
+class Arret(Exception):
+    """Le script ne peut pas tourner (code 2)."""
+
+
+def lancer(cmd, cwd, entree=None, limite=None):
+    try:
+        p = subprocess.run(cmd, cwd=cwd, input=entree, capture_output=True, timeout=limite)
+    except subprocess.TimeoutExpired:
+        return 124, "", "délai dépassé"
+    return p.returncode, p.stdout.decode(errors="replace"), p.stderr.decode(errors="replace")
+
+
+def git(racine, *args, entree=None, ok=True):
+    rc, out, err = lancer(["git", *args], racine, entree)
+    if ok and rc != 0:
+        raise Arret(f"git {args[0]} a échoué : {err.strip()[:200]}")
+    return out
+
+
+# ---------- tests Go ----------
+
+FUNC_TEST = re.compile(r"^func (Test\w+)\(")
+
+
+def fonctions_test(chemin):
+    """{nom: (première ligne, dernière ligne)} des fonctions Test* d'un fichier."""
+    res, nom, debut, i = {}, None, 0, 0
+    with open(chemin, encoding="utf-8", errors="replace") as f:
+        for i, ligne in enumerate(f, 1):
+            m = FUNC_TEST.match(ligne)
+            if m:
+                if nom:
+                    res[nom] = (debut, i - 1)
+                nom, debut = m.group(1), i
+                if ligne.count("{") and ligne.count("{") == ligne.count("}"):   # fonction sur une seule ligne
+                    res[nom] = (i, i)
+                    nom = None
+            elif nom and ligne.startswith("}"):
+                res[nom] = (debut, i)
+                nom = None
+    if nom:
+        res[nom] = (debut, i)
+    return res
+
+
+def lignes_changees(racine, base, fichier):
+    """Numéros des lignes ajoutées ou modifiées (côté nouveau fichier) depuis base."""
+    out = git(racine, "diff", "-U0", base, "--", fichier)
+    lignes = set()
+    for m in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", out, re.M):
+        d, n = int(m.group(1)), int(m.group(2) or 1)
+        lignes.update(range(d, d + max(n, 1)))
+    return lignes
+
+
+def module_de(racine, rel):
+    """(dossier du module, chemin du paquet ./x/y) pour un fichier, ou None sans go.mod au-dessus."""
+    d = os.path.dirname(rel)
+    mod = d
+    while True:
+        if os.path.isfile(os.path.join(racine, mod, "go.mod")):
+            break
+        if mod in ("", "."):
+            return None
+        mod = os.path.dirname(mod)
+    paquet = os.path.relpath(d or ".", mod or ".")
+    return mod or ".", "./" + ("" if paquet == "." else paquet)
+
+
+def go_test(dossier_mod, paquet, noms, fois=1, race=False, limite=LIMITE_ANCIEN):
+    """Lance go test -json. Renvoie {"compile": bool, "pass": Counter, "fail": Counter, "sortie": str, "erreur_compil": str}."""
+    cmd = ["go", "test", "-json", f"-count={fois}", f"-timeout={limite}", "-run", "^(" + "|".join(sorted(noms)) + ")$"]
+    if race:
+        cmd.append("-race")
+    cmd.append(paquet)
+    rc, out, err = lancer(cmd, dossier_mod, limite=60 * 60)
+    res = {"rc": rc, "compile": True, "pass": collections.Counter(), "fail": collections.Counter(), "sortie": "", "erreur_compil": ""}
+    sorties, compil = [], []
+    for ligne in out.splitlines():
+        try:
+            e = json.loads(ligne)
+        except ValueError:
+            compil.append(ligne)
+            continue
+        a, t = e.get("Action"), e.get("Test")
+        if a == "build-output":
+            compil.append(e.get("Output", ""))
+        elif a == "build-fail" or (a == "fail" and not t and e.get("FailedBuild")):
+            res["compile"] = False
+        elif a == "output":
+            sorties.append(e.get("Output", ""))
+        elif a in ("pass", "fail") and t and "/" not in t:
+            res[a][t] += 1
+    if err.strip():
+        compil.append(err)
+    if rc != 0 and not res["pass"] and not res["fail"] and any(".go:" in c or "build failed" in c or "setup failed" in c for c in compil + sorties):
+        res["compile"] = False
+    res["sortie"] = "".join(sorties)
+    res["erreur_compil"] = next((c.strip() for c in compil if re.search(r"\.go:\d+", c)), (compil[0].strip() if compil else ""))
+    return res
+
+
+# ---------- morceaux modifiés (pour --mutation) ----------
+
+def normaliser(ligne):
+    """Ligne sans commentaire « // » ni espaces : deux lignes égales ainsi ne diffèrent que par la mise en forme."""
+    ligne = re.sub(r"//.*", "", ligne)
+    return re.sub(r"\s+", "", ligne)
+
+
+def morceaux(diff):
+    """Découpe un git diff -U0 d'un fichier en (en-tête, [ (texte du morceau, ligne de départ, -lignes, +lignes) ])."""
+    entete, res, cur = [], [], None
+    for ligne in diff.splitlines(keepends=True):
+        if ligne.startswith("@@"):
+            m = re.match(r"^@@ -\S+ \+(\d+)", ligne)
+            cur = [ligne, int(m.group(1)), [], []]
+            res.append(cur)
+        elif cur is None:
+            entete.append(ligne)
+        else:
+            cur[0] += ligne
+            if ligne.startswith("-"):
+                cur[2].append(ligne[1:].rstrip("\n"))
+            elif ligne.startswith("+"):
+                cur[3].append(ligne[1:].rstrip("\n"))
+    return "".join(entete), res
+
+
+def ligne_qui_compte(debut, moins, plus):
+    """(numéro, texte) de la première ligne vraiment changée, ou None si le morceau ne change que commentaires/mise en forme."""
+    retirees = collections.Counter(normaliser(l) for l in moins if normaliser(l))
+    ajoutees = collections.Counter(normaliser(l) for l in plus if normaliser(l))
+    if retirees == ajoutees:
+        return None
+    reste = retirees.copy()
+    for i, l in enumerate(plus):
+        n = normaliser(l)
+        if not n:
+            continue
+        if reste[n] > 0:
+            reste[n] -= 1          # même ligne qu'avant, juste réalignée
+            continue
+        return debut + i, l.strip()
+    # morceau qui ne fait que retirer du code : la première ligne retirée qui n'a pas été remise
+    reste = ajoutees.copy()
+    for l in moins:
+        n = normaliser(l)
+        if not n:
+            continue
+        if reste[n] > 0:
+            reste[n] -= 1
+            continue
+        return debut, "(ligne retirée) " + l.strip()
+    return None
+
+
+# ---------- vérification ----------
+
+def verifier(o):
+    dossier = os.path.abspath(o.dossier)
+    if not os.path.isdir(dossier):
+        raise Arret(f"dossier introuvable : {dossier}")
+    rc, racine, _ = lancer(["git", "rev-parse", "--show-toplevel"], dossier)
+    if rc != 0:
+        raise Arret(f"pas un dépôt git : {dossier}")
+    racine = racine.strip()
+    if lancer(["git", "rev-parse", "--verify", "-q", o.depuis + "^{commit}"], racine)[0] != 0:
+        raise Arret(f"commit de départ inconnu : {o.depuis}")
+    base = git(racine, "rev-parse", "--short", o.depuis).strip()
+
+    suivis = git(racine, "ls-files").splitlines()
+    non_suivis = git(racine, "ls-files", "--others", "--exclude-standard").splitlines()
+    langages = sorted({MANIFESTES[os.path.basename(f)] for f in suivis + non_suivis if os.path.basename(f) in MANIFESTES})
+    changes = sorted({f for f in git(racine, "diff", "--name-only", base).splitlines() + non_suivis
+                      if os.path.isfile(os.path.join(racine, f))})
+    langages_changes = sorted({EXTENSIONS[os.path.splitext(f)[1]] for f in changes if os.path.splitext(f)[1] in EXTENSIONS})
+
+    r = {"statut": "ok", "depuis": base, "mode": "doivent-echouer" if o.doivent_echouer else "mutation" if o.mutation else "rapide", "dossier": racine,
+         "tests": [], "problemes": [], "avertissements": []}
+    if "Go" not in langages:
+        raise Arret("langage pas encore géré : " + (", ".join(langages) if langages else "aucun langage reconnu (go.mod, package.json, pyproject.toml, Cargo.toml)"))
+    autres = [l for l in langages_changes if l != "Go"]
+    if autres:
+        r["avertissements"].append("fichiers " + ", ".join(autres) + " modifiés non vérifiés : langage pas encore géré")
+
+    # tests à vérifier : tous ceux d'un nouveau fichier, ou ceux dont le corps a changé
+    a_verifier = collections.defaultdict(dict)   # (module, paquet) -> {nom: (fichier, ligne)}
+    fichiers_test = [f for f in changes if f.endswith("_test.go")]
+    for f in fichiers_test:
+        fonctions = fonctions_test(os.path.join(racine, f))
+        nouveau = lancer(["git", "cat-file", "-e", f"{base}:{f}"], racine)[0] != 0
+        changees = None if nouveau else lignes_changees(racine, base, f)
+        mp = module_de(racine, f)
+        if not mp:
+            r["avertissements"].append(f"pas de go.mod au-dessus de {f} : ignoré")
+            continue
+        for nom, (d, fin) in fonctions.items():
+            if nouveau or any(d <= l <= fin for l in changees):
+                a_verifier[mp][nom] = (f, d)
+    for (mod, paquet), noms in sorted(a_verifier.items()):
+        for nom, (f, d) in sorted(noms.items()):
+            r["tests"].append({"paquet": paquet, "module": mod, "test": nom, "fichier": f, "ligne": d})
+    go_modifie = [f for f in changes if f.endswith(".go") and not f.endswith("_test.go")]
+    if not a_verifier:
+        if go_modifie:
+            r["avertissements"].append("du code Go a changé mais aucun test Go n'a été ajouté ou modifié")
+        return r
+
+    def probleme(type_, message, fichier="", ligne=0, test="", bloquant=True):
+        r["problemes"].append({"type": type_, "bloquant": bloquant, "fichier": fichier, "ligne": ligne, "test": test, "message": message})
+
+    if o.doivent_echouer:
+        # chaque test seul (un panic("à faire") arrête tout le paquet et cacherait les autres tests)
+        for (mod, paquet), noms in sorted(a_verifier.items()):
+            for n in sorted(noms):
+                f, d = noms[n]
+                res = go_test(os.path.join(racine, mod), paquet, {n})
+                if not res["compile"]:
+                    probleme("impossible", "ne compile pas : " + res["erreur_compil"][:200], f, d, n)
+                elif res["pass"][n] and not res["fail"][n]:
+                    probleme("non_verifie", "passe déjà avant le travail des ouvriers : ce test ne prouve rien", f, d, n)
+                elif not res["fail"][n] and res["rc"] == 0:
+                    probleme("echec", "le test ne s'est pas lancé (nom introuvable ?)", f, d, n)
+        if any(p["bloquant"] for p in r["problemes"]):
+            r["statut"] = "probleme"
+        return r
+
+    tmp = tempfile.mkdtemp(prefix="verifier-tests-")
+    arbres = []
+
+    def nouvel_arbre(nom):
+        chemin = os.path.join(tmp, nom)
+        git(racine, "worktree", "add", "--detach", "-q", chemin, base)
+        arbres.append(chemin)
+        return chemin
+
+    try:
+        # 1. ancien code + nouveaux tests
+        ancien = nouvel_arbre("ancien")
+        for f in fichiers_test:
+            os.makedirs(os.path.join(ancien, os.path.dirname(f)), exist_ok=True)
+            shutil.copy2(os.path.join(racine, f), os.path.join(ancien, f))
+        impossibles = []
+        for (mod, paquet), noms in sorted(a_verifier.items()):
+            res = go_test(os.path.join(ancien, mod), paquet, noms)
+            if not res["compile"]:
+                impossibles += [(n, paquet, noms[n]) for n in sorted(noms)]
+                continue
+            for n in sorted(noms):
+                if res["pass"][n] and not res["fail"][n]:
+                    probleme("non_verifie", "passe déjà sur l'ancien code : ce test ne prouve pas la correction",
+                             noms[n][0], noms[n][1], n)
+        for n, paquet, (f, d) in impossibles:
+            probleme("impossible", "ne compile pas sur l'ancien code (il utilise du code nouveau) : vérifiable seulement avec --mutation",
+                     f, d, n, bloquant=False)
+
+        # 2. N passages avec -race dans le vrai dossier
+        stables = {}   # (module, paquet) -> tests qui passent à chaque passage : les seuls utiles pour la mutation
+        for (mod, paquet), tous in sorted(a_verifier.items()):
+            noms = dict(tous)
+            for _ in range(3):   # un test qui bloque arrête tout le paquet : on le signale et on relance les autres sans lui
+                res = go_test(os.path.join(racine, mod), paquet, noms, fois=o.fois, race=True, limite=LIMITE_FRAGILE)
+                sortie = res["sortie"]
+                if not res["compile"] or "test timed out" not in sortie:
+                    break
+                bloques = [b for b in re.findall(r"^\s+(Test\w+) \(", sortie.split("test timed out", 1)[1], re.M) if b in noms]
+                for b in bloques or [None]:
+                    probleme("echec", f"blocage : ne finit pas en {LIMITE_FRAGILE} (ou trop lent pour {o.fois} passages)",
+                             *(noms[b] if b else ("", 0)), b or paquet)
+                for b in bloques:
+                    del noms[b]
+                if not bloques or not noms:
+                    break
+            if not res["compile"]:
+                probleme("echec", "ne compile pas : " + res["erreur_compil"][:200], test=", ".join(sorted(noms)))
+                continue
+            if not noms or "test timed out" in sortie:
+                continue
+            stables[(mod, paquet)] = {n: noms[n] for n in noms if res["pass"][n] and not res["fail"][n]} if res["rc"] == 0 else {}
+            for n in sorted(noms):
+                f, d = noms[n]
+                k, passages = res["fail"][n], res["fail"][n] + res["pass"][n]   # passages réellement faits (moins si blocage)
+                if k and k >= passages:
+                    probleme("echec", f"échoue à chaque passage ({k} sur {passages})", f, d, n)
+                elif k:
+                    probleme("fragile", f"échoue {k} fois sur {passages}", f, d, n)
+            if res["rc"] != 0 and "test timed out" not in sortie and not any(res["fail"][n] for n in noms):
+                if "DATA RACE" in sortie:
+                    probleme("echec", "course de données détectée par -race", test=paquet)
+                elif "panic:" in sortie:
+                    probleme("echec", "panique : " + re.search(r"panic:.*", sortie).group(0)[:150], test=paquet)
+                else:
+                    probleme("echec", f"go test a échoué (code {res['rc']}) sans test nommé", test=paquet)
+
+        # 3. mutation : retirer un morceau modifié à la fois
+        if o.mutation:
+            nouveau = nouvel_arbre("nouveau")
+            patch = git(racine, "diff", "--binary", base)
+            if patch:
+                rc, _, err = lancer(["git", "apply", "--whitespace=nowarn"], nouveau, entree=patch.encode())
+                if rc != 0:
+                    raise Arret("impossible de recopier les changements dans la copie : " + err.strip()[:200])
+            for f in non_suivis:
+                os.makedirs(os.path.join(nouveau, os.path.dirname(f)), exist_ok=True)
+                shutil.copy2(os.path.join(racine, f), os.path.join(nouveau, f))
+
+            def tests_passent():
+                for (mod, paquet), noms in sorted(stables.items()):
+                    if not noms:
+                        continue
+                    res = go_test(os.path.join(nouveau, mod), paquet, noms)
+                    if not res["compile"] or res["rc"] != 0:
+                        return False
+                return True
+
+            if not any(stables.values()):
+                r["avertissements"].append("mutation impossible : aucun test ne passe à chaque fois")
+                go_modifie = []
+            # paquets où un test échoue, est fragile ou bloque : déjà signalé, la mutation n'y apprendrait rien
+            douteux = {k for k in a_verifier if len(stables.get(k, {})) < len(a_verifier[k])}
+            for k in sorted(douteux):
+                r["avertissements"].append(f"mutation sautée pour {k[1]} : des tests y échouent déjà")
+            for f in go_modifie:
+                if lancer(["git", "cat-file", "-e", f"{base}:{f}"], racine)[0] != 0:
+                    continue   # fichier tout neuf : le retirer casse la compilation, rien à apprendre
+                mp = module_de(racine, f)
+                if mp in douteux:
+                    continue
+                entete, liste = morceaux(git(racine, "diff", "-U0", base, "--", f))
+                for texte, debut, moins, plus in liste:
+                    qui = ligne_qui_compte(debut, moins, plus)
+                    if qui is None:
+                        continue   # commentaires ou mise en forme seulement
+                    chemin = os.path.join(nouveau, f)
+                    with open(chemin, "rb") as h:
+                        sauve = h.read()
+                    rc, _, _ = lancer(["git", "apply", "-R", "--unidiff-zero", "-"], nouveau, entree=(entete + texte).encode())
+                    try:
+                        if rc == 0 and tests_passent():
+                            probleme("non_verifie", f"on peut retirer « {qui[1][:80]} » : les tests passent encore", f, qui[0])
+                    finally:
+                        with open(chemin, "wb") as h:
+                            h.write(sauve)
+    finally:
+        for a in arbres:
+            lancer(["git", "worktree", "remove", "--force", a], racine)
+        shutil.rmtree(tmp, ignore_errors=True)
+        lancer(["git", "worktree", "prune"], racine)
+
+    if any(p["bloquant"] for p in r["problemes"]):
+        r["statut"] = "probleme"
+    return r
+
+
+# ---------- sortie ----------
+
+def afficher(r):
+    print(f"Vérification des tests Go depuis {r['depuis']} ({r['mode']})")
+    par_paquet = collections.defaultdict(list)
+    for t in r["tests"]:
+        par_paquet[t["paquet"]].append(t["test"])
+    if par_paquet:
+        print("Tests vérifiés : " + " ; ".join(f"{p} : {', '.join(n)}" for p, n in sorted(par_paquet.items())))
+    else:
+        print("Aucun test Go ajouté ou modifié.")
+    for p in r["problemes"]:
+        if not p["bloquant"]:
+            continue
+        ou = f"{p['fichier']}:{p['ligne']}" if p["fichier"] else ""
+        qui = " : ".join(x for x in (ou, p["test"]) if x)
+        print(f"PROBLÈME {p['type']} : {qui} : {p['message']}")
+    imp = [p for p in r["problemes"] if p["type"] == "impossible" and not p["bloquant"]]
+    if imp:
+        print(f"À savoir : {len(imp)} test(s) ne compilent pas sur l'ancien code, donc pas vérifiables ainsi"
+              f"{'' if r['mode'] == 'mutation' else ' (--mutation les vérifie autrement)'} : " + ", ".join(p["test"] for p in imp))
+    for a in r["avertissements"]:
+        print("À savoir : " + a)
+    n = sum(1 for p in r["problemes"] if p["bloquant"])
+    print("RÉSULTAT : TESTS OK" if n == 0 else f"RÉSULTAT : {n} PROBLÈME(S)")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="verifier-tests", description="Vérifie que les tests ajoutés ou modifiés prouvent vraiment quelque chose (Go).")
+    ap.add_argument("--depuis", default="HEAD", help="commit de départ (défaut : HEAD)")
+    ap.add_argument("--dossier", default=".", help="dossier du projet (défaut : dossier courant)")
+    ap.add_argument("--mutation", action="store_true", help="retire un morceau modifié à la fois (lent)")
+    ap.add_argument("--doivent-echouer", action="store_true", help="avant le travail : chaque nouveau test doit compiler et échouer")
+    ap.add_argument("--json", action="store_true", help="sortie JSON pour un programme")
+    ap.add_argument("--fois", type=int, default=int(os.environ.get("VERIFIER_FOIS", "20")), help="passages avec -race (défaut 20)")
+    o = ap.parse_args()
+
+    def arreter(sig, _):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, arreter)
+    try:
+        r = verifier(o)
+        code = 1 if r["statut"] == "probleme" else 0
+    except Arret as e:
+        r, code = {"statut": "erreur", "message": str(e)}, 2
+    except KeyboardInterrupt:
+        r, code = {"statut": "erreur", "message": "interrompu"}, 2
+    except Exception as e:  # le script lui-même a planté
+        r, code = {"statut": "erreur", "message": f"erreur interne : {type(e).__name__}: {e}"}, 2
+    if o.json:
+        print(json.dumps(r, ensure_ascii=False, indent=1))
+    elif code == 2:
+        print("VÉRIFICATION IMPOSSIBLE : " + r["message"])
+    else:
+        afficher(r)
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()

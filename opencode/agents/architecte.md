@@ -44,15 +44,8 @@ format de CHANTIER.json) : utilise la fiche projet, ne revérifie pas ces inform
    - les valeurs exactes de la demande (ex. 30 s, 100 Mo, code 413), ET les valeurs par défaut réelles : un test
      vérifie que le serveur créé normalement (ex. `Nouveau(...)`) a bien 30 s et 100 Mo, pas seulement le mécanisme
      avec une valeur posée par le test ;
-   - TEMPS OU GOROUTINES (délais, contextes, canaux, fermeture, plafonds) : lis d'abord la skill `tests-concurrence`
-     (et sa liste `pieges.md` : garde les pièges qui concernent la tâche, un test par piège). Utilise
-     `testing/synctest` (horloge simulée, aucune vraie attente, fuite de goroutine vue) ; il faut `go 1.25` ou plus
-     dans go.mod : mets-le à jour toi-même ;
    - jamais de vraie attente : les durées sont réglables et les tests les mettent à quelques millisecondes ; pas de
      `time.Sleep` pour « attendre que ça passe », on attend un signal (canal, compteur) avec une limite courte ;
-   - avant de verrouiller un test de concurrence : lance-le seul 20 fois avec `-race` sur une version juste que tu
-     écris à part, dans un dossier temporaire HORS du projet (`mktemp -d`), et que tu effaces ensuite (sinon les
-     ouvriers la recevraient) ; s'il échoue une seule fois, il est faux ou fragile : corrige-le ;
    - toujours `defer goleak.VerifyNone(t)` (paquet `go.uber.org/goleak`) dans un test qui démarre ou arrête des
      goroutines, pour prouver qu'elles s'arrêtent. S'il n'est pas dans go.mod : `go get go.uber.org/goleak@v1.3.0`
      (go.mod et go.sum deviennent alors des fichiers verrouillés) ;

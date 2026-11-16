@@ -105,12 +105,6 @@ référence juste (chaque test seul, 20 fois) et sur 7 versions cassées exprès
 - 7 boucles de réflexion sur 9 s'arrêtent seules au plafond de 32 000 jetons (environ 5 min) ; le plus long silence
   d'un ouvrier gagnant est de 5,4 min.
 
-Biais à garder en tête pour les mesures suivantes : la liste [`pieges.md`](skills/tests-concurrence/pieges.md) donnée
-ensuite à l'architecte cite les mêmes catégories de pièges que ce jury (fermeture appelée deux fois, envoi après
-fermeture, contexte jamais annulé, plafond sous charge…). Un essai sur cette tâche mesure donc si l'architecte
-APPLIQUE la liste, pas s'il DÉCOUVRE les pièges seul. Pour mesurer la découverte : une autre tâche, avec un nouveau
-jury écrit à l'aveugle (avant de voir la moindre préparation).
-
 Constats : le chef passe 70 à 77 % de son temps à réfléchir (Qwen3.8-27B est réglé par défaut sur une
 réflexion très élevée) ; les ouvriers ne sont pas assez fiables pour travailler sans être revérifiés.
 En cours : essai d'un autre modèle d'ouvrier (Qwen3.6-35B-A3B NVFP4) et d'une réflexion plus courte pour le chef.
@@ -164,7 +158,6 @@ la mutation : [universalmutator](https://github.com/agroce/universalmutator) (to
 | Skill | Rôle | Origine |
 |---|---|---|
 | `tdd` | Écrire le test qui échoue d'abord, puis le minimum de code ; tester ce que fait le code, pas comment il le fait | [mattpocock/skills](https://github.com/mattpocock/skills), licence MIT, avec une section ajoutée pour un agent qui travaille seul |
-| [`tests-concurrence`](skills/tests-concurrence/SKILL.md) | Pour l'architecte : tests fiables avec du temps ou des goroutines (jamais de `time.Sleep` pour synchroniser, attendre le vrai signal, `testing/synctest`, goleak, `-race`), et une [liste générale de pièges](skills/tests-concurrence/pieges.md) selon le type de code | écrite ici, après les mesures du 16/11 (tests verrouillés fragiles) |
 
 ## Règles
 

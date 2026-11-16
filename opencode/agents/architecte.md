@@ -45,7 +45,9 @@ format de CHANTIER.json) : utilise la fiche projet, ne revérifie pas ces inform
      goroutines, pour prouver qu'elles s'arrêtent. S'il n'est pas dans go.mod : `go get go.uber.org/goleak@v1.3.0`
      (go.mod et go.sum deviennent alors des fichiers verrouillés) ;
    - les tests d'une même tâche commencent par le même préfixe (ex. `TestFlux…`), pour que la commande de test soit
-     simple : `go test ./interne/web -run TestFlux -race -count=1`.
+     simple : `go test ./interne/web -run TestFlux -race -count=1 -timeout 60s` ;
+   - toujours `-timeout 60s` dans une commande go test (un blocage entre goroutines ne doit pas figer un essai
+     10 minutes) : Ulysse refuse CHANTIER.json sans cette limite.
 
 4. VÉRIFIER avant de rendre la main :
    - `go vet ./...` doit passer (le squelette et les tests compilent) ;
@@ -64,7 +66,7 @@ format de CHANTIER.json) : utilise la fiche projet, ne revérifie pas ces inform
       "tests_verrouilles": ["serveur/interne/web/flux_test.go"],
       "consigne": "Ce que l'ouvrier doit faire, en 3 à 8 lignes précises : comportement, valeurs, cas d'erreur.",
       "dossier": "serveur",
-      "test": "go test ./interne/web -run TestFlux -race -count=1",
+      "test": "go test ./interne/web -run TestFlux -race -count=1 -timeout 60s",
       "ouvriers": 1,
       "pourquoi_plusieurs": ""
     }
@@ -74,7 +76,8 @@ format de CHANTIER.json) : utilise la fiche projet, ne revérifie pas ces inform
    - `nom` : lettres minuscules, chiffres et tirets ; `fichiers` : chemins depuis la racine du projet, que des fichiers
      de cette tâche ; `dossier` : où lancer la commande ; `test` : une seule commande `go test …`, sans `;`, `&&`, `|`,
      `` ` ``, `$(` ni redirection (Ulysse refuse le reste).
-   - Les fichiers de test et go.mod/go.sum ne sont jamais dans `fichiers`.
+   - Les fichiers de test ne sont jamais dans `fichiers`, ni les fichiers réservés à l'architecte (ils décident de ce
+     que lancent les tests) : go.mod, go.sum, package.json, pyproject.toml, conftest.py, pytest.ini, tox.ini, setup.cfg.
    Termine par 3 lignes : nombre de tâches, nombre de tests écrits, dernière ligne de `verifier-tests --doivent-echouer`.
 
 # 2. RELIRE (message qui commence par « RELECTURE COURTE » ou « RELECTURE FINALE »)

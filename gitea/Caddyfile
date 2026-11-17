@@ -1,0 +1,13 @@
+# Chiffrement (HTTPS) devant Gitea : certificat signé par la CA locale du Caddy du Spark (déjà connue des VM),
+# comme pour LiteLLM.
+{
+	auto_https off
+	admin off
+}
+https://:3443 {
+	tls /tls/gitea.crt /tls/gitea.key
+	request_body {
+		max_size 512MB
+	}
+	reverse_proxy gitea:3000
+}

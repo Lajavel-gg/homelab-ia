@@ -77,6 +77,7 @@ flowchart LR
 
 ```
 litellm/          passerelle LiteLLM (une clé par VM, HTTPS via Caddy) devant les deux vLLM du Spark
+gitea/            bac à sable des IA : Gitea + synchro GitHub -> Gitea (main protégé, les IA sur leurs branches ia/…)
 docs/             décisions techniques (deux vLLM sur un GPU)
 spark/bancs/      scripts de charge et de vitesse pour vLLM
 opencode/agents/  agents OpenCode : chef d'équipe, codeur, réflexion, relecteur

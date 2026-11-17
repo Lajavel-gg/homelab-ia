@@ -1,0 +1,31 @@
+#!/bin/bash
+# Met (ou remplace) la clé GitHub de la synchro dans /etc/gitea-synchro.env SANS l'afficher :
+# la clé est tapée ou collée à l'aveugle, ne passe ni dans l'historique du shell, ni dans la ligne de commande.
+# Usage, sur la VM Gitea : sudo mettre-cle-github
+set -euo pipefail
+FICHIER=${1:-/etc/gitea-synchro.env}
+[ "$(id -u)" -eq 0 ] || { echo "À lancer avec sudo." >&2; exit 1; }
+[ -f "$FICHIER" ] || { echo "$FICHIER n'existe pas (voir gitea/README.md, étape 4)." >&2; exit 1; }
+
+read -rsp "Colle la clé GitHub (github_pat_…), elle ne s'affiche pas, puis Entrée : " CLE
+echo
+case "$CLE" in
+	github_pat_*) ;;
+	*) echo "Ce n'est pas une clé fine-grained (elle doit commencer par github_pat_). Rien n'a changé." >&2; exit 1 ;;
+esac
+case "$CLE" in
+	*[!A-Za-z0-9_]*) echo "La clé contient un caractère inattendu (espace ?). Rien n'a changé." >&2; exit 1 ;;
+esac
+
+# Nouveau fichier à côté, mêmes droits, puis remplacement d'un coup (jamais de fichier à moitié écrit).
+NOUVEAU=$(mktemp "${FICHIER}.XXXXXX")
+trap 'rm -f "$NOUVEAU"' EXIT
+chmod --reference="$FICHIER" "$NOUVEAU"
+chown --reference="$FICHIER" "$NOUVEAU"
+grep -v '^GITHUB_TOKEN=' "$FICHIER" > "$NOUVEAU" || true
+printf 'GITHUB_TOKEN=%s\n' "$CLE" >> "$NOUVEAU"
+mv "$NOUVEAU" "$FICHIER"
+trap - EXIT
+unset CLE
+echo "Clé enregistrée dans $FICHIER (finit par …$(grep '^GITHUB_TOKEN=' "$FICHIER" | tail -c 5))."
+echo "Essai : sudo -u gitea-synchro SYNCHRO_ENV=$FICHIER /usr/local/bin/synchro_github.py --essai"

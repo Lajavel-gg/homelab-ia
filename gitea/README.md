@@ -43,12 +43,14 @@ projets où les IA travaillent, pas les repos privés sensibles.
 | [`synchro_github.py`](synchro_github.py) | Copie `main` et les tags de chaque repo GitHub vers Gitea, crée et protège les repos qui manquent |
 | [`synchro.env.example`](synchro.env.example) | Réglages de la synchro (clés GitHub et Gitea) |
 | [`gitea-synchro.service`](gitea-synchro.service), [`.timer`](gitea-synchro.timer) | La synchro toutes les 10 minutes |
+| [`mettre-cle-github`](mettre-cle-github) | Met ou remplace la clé GitHub dans `/etc/gitea-synchro.env` **sans l'afficher** |
 
 ## Installation (dans l'ordre)
 
 ### 1. La VM
 
-VM Debian sur Proxmox : 2 cœurs, 4 Go, 50 Go de disque. Installer `docker`, `git` et `python3`.
+VM Debian sur Proxmox : 2 cœurs, 4 Go, 50 Go de disque. Installer `docker`, `git`, `python3` et `qemu-guest-agent`
+(sans l'agent, Proxmox ne voit pas l'adresse de la VM et les sauvegardes ne peuvent pas la figer proprement).
 
 Pare-feu Proxmox de la VM :
 - **entrée** 3443 seulement depuis la VM OpenCode (115), la VM Hermes (121), la VM d'Ulysse et le VPN ;
@@ -60,8 +62,9 @@ Sauvegarde : un **snapshot Proxmox chaque nuit** (si une IA a tout cassé, on re
 
 ```sh
 sudo mkdir -p /opt/gitea && cd /opt/gitea      # y copier compose.yaml, Caddyfile, .env.example
-cp .env.example .env && chmod 600 .env          # remplir GITEA_DOMAINE et les deux secrets (commandes dans le fichier)
-mkdir -p data config tls && sudo chown -R 1000:1000 data config
+sudo chown root:root compose.yaml Caddyfile .env.example   # copiés par « debian » : les rendre à root
+sudo cp .env.example .env && sudo chmod 600 .env   # remplir GITEA_DOMAINE et les deux secrets (commandes dans le fichier)
+sudo mkdir -p data config tls && sudo chown -R 1000:1000 data config
 # tls/gitea.crt et tls/gitea.key : certificat signé par la CA locale du Spark (comme pour LiteLLM)
 docker compose up -d
 ```
@@ -98,8 +101,10 @@ Sur GitHub : *Settings → Developer settings → Fine-grained tokens → Genera
 
 ```sh
 sudo useradd --system --home /var/lib/gitea-synchro gitea-synchro
-sudo install -m 755 synchro_github.py /usr/local/bin/
-sudo install -m 600 -o gitea-synchro synchro.env.example /etc/gitea-synchro.env   # puis le remplir
+sudo install -d -m 700 -o gitea-synchro -g gitea-synchro /var/lib/gitea-synchro   # le cache (systemd le crée aussi, mais pas l'essai à la main)
+sudo install -m 755 synchro_github.py mettre-cle-github /usr/local/bin/
+sudo install -m 600 -o gitea-synchro synchro.env.example /etc/gitea-synchro.env   # puis remplir GITEA_TOKEN…
+sudo mettre-cle-github      # colle la clé GitHub à l'aveugle : elle ne s'affiche jamais
 sudo -u gitea-synchro SYNCHRO_ENV=/etc/gitea-synchro.env /usr/local/bin/synchro_github.py --essai   # ne change rien
 sudo cp gitea-synchro.service gitea-synchro.timer /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now gitea-synchro.timer

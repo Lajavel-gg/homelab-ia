@@ -17,7 +17,7 @@ Vérifié le 17/11 sur un vrai Gitea 1.27.3, en jouant le rôle de l'IA :
 
 | Action | Compte `ia` (OpenCode, Hermes) | Compte `synchro` |
 |---|---|---|
-| Lire et cloner tous les repos de `projets` | ✅ | ✅ |
+| Lire et cloner un repo de `projets` | ✅ seulement ceux de `IA_REPOS` | ✅ tous |
 | Pousser une branche `ia/…` | ✅ | ✅ |
 | Ouvrir une pull request, une issue | ✅ | ✅ |
 | Pousser ou forcer `main` | ❌ refusé par Gitea | ✅ (seul compte permis) |
@@ -27,8 +27,10 @@ Vérifié le 17/11 sur un vrai Gitea 1.27.3, en jouant le rôle de l'IA :
 | Écrire sur GitHub | ❌ aucune clé | ❌ clé GitHub en **lecture seule** |
 
 Donc une IA piégée peut au pire salir ses propres branches `ia/…` : `main` reste la copie exacte de GitHub, et GitHub
-n'est jamais touché. Le vrai risque restant : une IA qui a aussi le web peut **envoyer du code privé dehors** ;
-c'est réglé par le pare-feu (plus bas), pas par Gitea.
+n'est jamais touché. Le vrai risque restant : la VM d'OpenCode a Internet, donc une IA piégée peut **envoyer dehors
+le code qu'elle lit**. C'est pour ça que Gitea copie **tous** les repos (sauvegarde, scans) mais que l'équipe `ia` ne
+voit **que** ceux de `IA_REPOS` (vérifié : les autres répondent 404, même pour un clone). Mettre dans la liste les
+projets où les IA travaillent, pas les repos privés sensibles.
 
 ## Fichiers
 
@@ -37,7 +39,7 @@ c'est réglé par le pare-feu (plus bas), pas par Gitea.
 | [`compose.yaml`](compose.yaml) | Gitea 1.27.3 (sans SSH, inscription fermée, tout privé, rien de visible sans compte) + Caddy en HTTPS sur 3443 |
 | [`Caddyfile`](Caddyfile) | HTTPS avec un certificat de la CA locale du Spark, comme LiteLLM |
 | [`.env.example`](.env.example) | Secrets de Gitea |
-| [`preparer.py`](preparer.py) | Crée l'organisation `projets`, l'équipe `ia`, et range `synchro` et `ia` dans leurs équipes |
+| [`preparer.py`](preparer.py) | Crée l'organisation `projets` et l'équipe `ia`, range `synchro` et `ia`, et ouvre à `ia` **seulement** les repos de `IA_REPOS` |
 | [`synchro_github.py`](synchro_github.py) | Copie `main` et les tags de chaque repo GitHub vers Gitea, crée et protège les repos qui manquent |
 | [`synchro.env.example`](synchro.env.example) | Réglages de la synchro (clés GitHub et Gitea) |
 | [`gitea-synchro.service`](gitea-synchro.service), [`.timer`](gitea-synchro.timer) | La synchro toutes les 10 minutes |
@@ -84,6 +86,9 @@ Puis, avec la clé de `gabe` (relançable sans risque) :
 GITEA_TOKEN=<clé de gabe> python3 preparer.py
 ```
 
+L'équipe `ia` ne voit encore aucun repo : on lui ouvre les siens **après** le premier passage de la synchro
+(étape 4), quand les repos existent dans Gitea.
+
 ### 4. La synchro avec GitHub
 
 Sur GitHub : *Settings → Developer settings → Fine-grained tokens → Generate*
@@ -99,6 +104,13 @@ sudo -u gitea-synchro SYNCHRO_ENV=/etc/gitea-synchro.env /usr/local/bin/synchro_
 sudo cp gitea-synchro.service gitea-synchro.timer /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now gitea-synchro.timer
 journalctl -u gitea-synchro -n 30     # « garabou : à jour », « homelab-ia : à jour »…
+```
+
+Enfin, ouvrir à l'équipe `ia` les repos où les IA travaillent (relancer avec une autre liste pour en ajouter ou en
+retirer ; un repo absent de la liste lui est retiré) :
+
+```sh
+GITEA_TOKEN=<clé de gabe> IA_REPOS="garabou,homelab-ia" python3 preparer.py
 ```
 
 Ce que fait la synchro, à chaque passage :

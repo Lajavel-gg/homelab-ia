@@ -275,7 +275,7 @@ def trier(mails):
         # les crochets sont retirés pour qu'un mail ne puisse pas imiter le début du suivant
         propre = lambda t: re.sub(r"[\[\]<>]", " ", t)
         blocs.append(f"[MAIL {i}] De : {propre(ml['de'])} | Sujet : {propre(ml['sujet'])}\n{propre(ml['extrait'])}")
-    corps = {"model": "qwen3.8-flash-next", "temperature": 0.2, "max_tokens": 1500,
+    corps = {"model": "chef", "temperature": 0.2, "max_tokens": 1500,
              "chat_template_kwargs": {"enable_thinking": False},
              "messages": [{"role": "user", "content": CONSIGNE + "\n\n".join(blocs)}]}
     try:

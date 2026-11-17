@@ -6,9 +6,7 @@ model_list:
       api_base: https://192.168.0.18:8091/chef/v1
       api_key: os.environ/CLE_SPARK
       timeout: 1800
-  - model_name: qwen3.8-flash-next   # ancien nom, gardé pour que rien ne casse
-    litellm_params: *chef
-  - model_name: ouvrier         # Nemotron Lightning 30B : le code, jusqu'à 32 agents
+  - model_name: ouvrier         # Qwen3.6-35B-A3B : le code, jusqu'à 32 agents
     litellm_params:
       model: openai/ouvrier
       api_base: https://192.168.0.18:8091/ouvriers/v1

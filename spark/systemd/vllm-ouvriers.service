@@ -1,8 +1,12 @@
 [Unit]
-# vLLM 0.34rc1 (nightly 615c9d6, 14/11/2026) : turbo complet + async ; le plantage des noyaux Inductor quand le chef génère y est corrigé. Voir docs/vllm-deux-instances.md
-Description=Ouvriers Nemotron 3.5 Lightning 30B-A3B NVFP4 (vLLM, 127.0.0.1:8092, noms ouvrier + lightning-30b, 32 agents, vLLM 0.34rc1 turbo complet, bug du 13/11 corrigé en amont en même temps)
+# Qwen3.6-35B-A3B NVFP4 (nvidia/Qwen3.6-35B-A3B-NVFP4, révision HF 1355db6a052410cfd62085d94b58866fd0f2c3c5 ; poids identiques
+# depuis 6c7f09d4036e, sha256 vérifiés). Recette NVIDIA pour le DGX Spark (model card), adaptée au partage avec le chef :
+# 0.40 de la mémoire, 131072 de contexte, 32 requêtes. MTP 3 jetons (brouillon en Triton). Mesures et TENU x2 : 15/11.
+# Ancien service Lightning gardé désactivé : vllm-ouvriers-lightning.service. Voir /opt/ai-stack/DECISIONS.md
+Description=Ouvriers Qwen3.6-35B-A3B NVFP4 + MTP 3 (vLLM 0.34rc1 615c9d6, 127.0.0.1:8092, nom ouvrier, 32 agents)
 After=vllm-chef.service docker.service
 Requires=docker.service
+Conflicts=vllm-ouvriers-lightning.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -11,12 +15,13 @@ ExecStartPre=-/usr/bin/docker rm -f ouvriers
 ExecStart=/usr/bin/docker run --rm --name ouvriers --gpus all --ipc=host --network host --oom-score-adj 900 \
   -e VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel -e VLLM_NO_USAGE_STATS=1 -e DO_NOT_TRACK=1 \
   -v /opt/models/hf:/models:ro -v /opt/ai-stack/vllm-cache:/root/.cache \
-  vllm/vllm-openai:nightly-615c9d6474a7793a024786e67fbb99791e809d98 /models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
-  --served-model-name ouvrier lightning-30b --host 127.0.0.1 --port 8092 --trust-remote-code \
-  --moe-backend marlin --kv-cache-dtype fp8 --enable-prefix-caching \
+  vllm/vllm-openai:nightly-615c9d6474a7793a024786e67fbb99791e809d98 /models/Qwen3.6-35B-A3B-NVFP4 \
+  --served-model-name ouvrier --host 127.0.0.1 --port 8092 --trust-remote-code \
+  --kv-cache-dtype fp8 --attention-backend flashinfer --moe-backend marlin \
+  --enable-chunked-prefill --async-scheduling --enable-prefix-caching --load-format fastsafetensors \
   --gpu-memory-utilization 0.40 --max-model-len 131072 --max-num-seqs 32 --max-num-batched-tokens 8192 \
-  --mamba-backend flashinfer --mamba-cache-mode align \
-  --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder --enable-auto-tool-choice
+  --reasoning-parser qwen3 --tool-call-parser qwen3_xml --enable-auto-tool-choice \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}'
 ExecStop=/usr/bin/docker stop -t 30 ouvriers
 Restart=always
 RestartSec=60

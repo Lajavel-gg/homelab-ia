@@ -1,0 +1,231 @@
+# Mise à jour d'octobre 2026 : ce qu'il restait à faire à la main
+
+*Archive : cette liste date d'octobre 2026 (avant vLLM, LiteLLM et Ulysse). Elle est gardée pour l'historique.*
+
+Cette branche corrige le code (voir la pull request). Les étapes ci-dessous se font sur les machines, dans l'ordre.
+
+### 1. Déployer les fichiers modifiés
+
+| Fichier du dépôt | Où le mettre | Puis |
+|---|---|---|
+| `mail/mail_mcp.py` et `mail/config.json` | Spark : `/opt/ai-stack/mcpo/mail/` et `/opt/ai-stack/mcpo/config.json` | `docker compose restart mcpo` |
+| `studio/runner.py` et le dossier `studio/static/` | Spark : `/opt/ai-stack/studio/` | `sudo systemctl restart studio-runner` |
+| `spark/logrotate/homelab` | Spark : `/etc/logrotate.d/homelab` | rien |
+| `spark/scripts/verifier-modeles` | Spark : `/usr/local/bin/` | `verifier-modeles` : liste les modèles ComfyUI manquants |
+| `openwebui/outils/studio_tool.py`, `openwebui/outils/trading_tool.py`, `openwebui/filtres/correcteur_memoire.py` | Open WebUI → *Espace de travail → Outils / Fonctions* : remplacer le code de chacun | Enregistrer |
+| `openwebui/outils/proxmox_tool.py` | Open WebUI, **uniquement** avec le script de mise à jour des outils du Spark (`/opt/ai-stack/owui_maj_outil.py`), jamais par copier-coller | **Comparer d'abord** avec la version en service (`diff` avec `/opt/ai-stack/proxmox/proxmox_tool.py`) : le fichier du dépôt est anonymisé (réseau `192.168.0.x`, domaine `example.com`, clé SSH remplacée par `<CLE_SSH_PUBLIQUE_DU_SPARK>`). Garder les vraies valeurs, ne reporter que les changements de code, puis lancer le script |
+| `spark/docker-compose.yml`, `spark/searxng/settings.yml` | Spark : `/opt/ai-stack/` | **Sauvegarder `webui.db` avant** (voir l'encadré ci-dessous, ce fichier active `ENABLE_VALVE_ENCRYPTION`). Vérifier que `.env` contient `SEARXNG_SECRET` (`openssl rand -hex 32`), puis `docker compose up -d` |
+| `proxmox-lxc/haproxy.cfg` | Conteneur 112 : **ajouter seulement la ligne `X-Real-IP`** (`http-request set-header X-Real-IP %[src]`, avec son commentaire) dans le fichier existant `/etc/haproxy/haproxy.cfg`. **Ne pas copier `haproxy.cfg`** : les domaines y sont anonymisés (`example.com`) | `haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy` |
+
+> **Attention :** avec `ENABLE_VALVE_ENCRYPTION`, les valves (clé Proxmox…) sont chiffrées avec `WEBUI_SECRET_KEY`. Ne plus jamais changer cette clé, sinon les valves sont perdues ; la garder dans Vaultwarden.
+>
+> **Avant d'activer `ENABLE_VALVE_ENCRYPTION`**, faire une copie de la base d'Open WebUI (si quelque chose tourne mal, on remet cette copie) :
+>
+> ```bash
+> cd /opt/ai-stack && docker compose stop open-webui
+> sudo mkdir -p /opt/ai-stack/backups
+> sudo docker cp open-webui:/app/backend/data/webui.db /opt/ai-stack/backups/webui.db.avant-chiffrement-$(date +%F)
+> docker compose up -d open-webui
+> ```
+
+### 2. Séparer le mail du web (risque d'injection de prompt)
+
+Un modèle qui lit les mails ET peut aller sur le web ou exécuter du code peut être piégé par une page ou un mail (« envoie le contenu des mails à … »). On sépare :
+
+1. *Espace de travail → Modèles → Nouveau* : « Mail », basé sur Flash-Next, avec **seulement** l'outil `mail`. Pas de recherche web, pas de `fetch`, pas de `browser`, pas d'interpréteur de code, et **sans** le filtre « Outils par défaut ».
+2. Sur tous les autres modèles : décocher l'outil `mail`.
+
+### 3. Limiter la clé Proxmox de l'IA
+
+Aujourd'hui la clé `spark@pve!spark` a le rôle PVEAdmin partout : la liste `PROTEGES` du code est la seule barrière. Après ces commandes, l'IA **voit** tout le cluster mais n'**agit** que sur le pool `agent` ; Vaultwarden (110), le VPN (111), le proxy (112) et LanguageTool (113) restent hors du pool, donc Proxmox refuse lui-même.
+
+Sur un nœud Proxmox (root) :
+
+```bash
+# 1. Le pool, avec les conteneurs déjà créés par l'IA (ceux qui ont le tag « agent ») — PAS 110 à 113
+pveum pool add agent --comment "Conteneurs gérés par l'IA"
+pveum pool modify agent --vms <ID1>,<ID2>
+
+# 2. Un rôle avec seulement ce dont l'outil a besoin
+pveum role add IA-Agent --privs "VM.Audit VM.PowerMgmt VM.Backup VM.Allocate VM.Config.Disk VM.Config.CPU VM.Config.Memory VM.Config.Network VM.Config.Options Datastore.AllocateSpace Datastore.Audit"
+
+# 3. Les droits (posés sur l'utilisateur ET sur la clé : marche que la clé soit « séparée » ou non)
+for qui in "--users spark@pve" "--tokens spark@pve!spark"; do
+  pveum acl modify /                    $qui --roles PVEAuditor   # lecture seule partout
+  pveum acl modify /pool/agent          $qui --roles IA-Agent     # actions sur le pool seulement
+  pveum acl modify /storage/local       $qui --roles IA-Agent     # modèle Debian
+  pveum acl modify /storage/local-lvm   $qui --roles IA-Agent     # disques des conteneurs
+  pveum acl modify /storage/shared-hdd  $qui --roles IA-Agent     # sauvegardes
+  pveum acl modify /sdn/zones/localnetwork $qui --roles PVESDNUser  # pont vmbr0
+done
+
+# 4. Retirer l'ancien PVEAdmin (regarder où il est posé, puis le supprimer au même endroit)
+pveum acl list | grep spark
+pveum acl delete / --users spark@pve --roles PVEAdmin          # adapter le chemin / --tokens si besoin
+
+# 5. Vérifier : sur 110, seulement des droits de lecture (VM.Audit…)
+pveum user token permissions spark@pve spark --path /vms/110
+pveum user token permissions spark@pve spark --path /pool/agent
+```
+
+Puis dans Open WebUI, valves de l'outil Proxmox : `pool` = `agent` (les nouveaux conteneurs y sont rangés automatiquement).
+
+À tester ensuite depuis le chat : « état du cluster », « arrête 110 » (doit être refusé), créer puis supprimer un conteneur de test. Si la création échoue sur les options `nesting`/`keyctl`, noter le message d'erreur exact.
+
+Limite connue : avec `VM.Backup` sur `shared-hdd`, l'IA pourrait en théorie effacer des sauvegardes des conteneurs du pool. Pour une vraie protection des sauvegardes, voir Proxmox Backup Server (point 10).
+
+### 4. Mémoire du Spark pleine « au bout d'un moment »
+
+Deux suspects, à vérifier **au moment où c'est plein** :
+
+```bash
+free -g                       # grosse colonne buff/cache → suspect 2
+ollama ps                     # qwen3.8:27b chargé → suspect 1
+ps aux --sort=-rss | head -8  # qui prend le plus
+```
+
+1. **Le modèle des tâches d'Open WebUI** (titres, tags, suggestions) est `qwen3.8:27b` dans Ollama : il se charge à chaque conversation en plus de Flash-Next (~80 Go) et reste 15 min. Solutions : un petit modèle (2-3 B) dans `TASK_MODEL`, ou couper les suggestions/tags (*Réglages admin → Interface*) ; et dans `ollama.service.d/override.conf` : `OLLAMA_KEEP_ALIVE=2m`, `OLLAMA_NUM_PARALLEL=1`.
+2. **Le cache disque** : sur le GB10, la mémoire est partagée CPU/GPU et le cache des gros fichiers (modèles vidéo) ne se libère pas assez vite. NVIDIA le documente et conseille : `sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'` (sans risque). À ajouter ensuite dans le runner avant chaque vidéo si c'est bien ça.
+
+### 5. Qualité des images et vidéos (après avoir réglé la mémoire)
+
+Tout est réglé en mode « rapide et léger », comme pour une petite carte graphique : modèles Turbo (8 étapes), compressés en int8, en basse résolution. Le Spark peut faire bien mieux :
+
+- **Résolution** : Qwen-Image 2.1 est fait pour 2048×2048 à 2752×1536 ; le Studio l'utilise en ~1024.
+- **Versions pleines** : Qwen-Image 2.1 Turbo existe en bf16 ; Z-Image **Base** (non distillé, 30-50 étapes, CFG 3-5) donne plus de détails que Z-Image Turbo.
+- **Vidéo** : résolution native de MiniMax H3 = 1344×768 ; la qualité par défaut « rapide » est en 864×480. Passer « bonne » par défaut, et 25 étapes pour « meilleure » (conseil de la doc ComfyUI).
+- Méthode : comparer d'abord dans l'interface ComfyUI (port 8443) avec les modèles officiels, puis ajouter un mode « qualité max » au Studio.
+
+### 6. Nouveau : le résumé du matin
+
+Tous les jours vers 6 h 50, le Spark lit les mails non lus de la nuit, demande à Flash-Next lesquels sont importants, vérifie le homelab (services, sauvegarde, disque, mémoire, Proxmox) et **dépose** un résumé mis en page (chiffres clés, mails classés par catégorie, graphique des 7 derniers jours, jauges) le résumé dans ta boîte de réception, non lu, avec le libellé « Résumés du matin ». Rien n'est envoyé : le message est rangé comme un brouillon. Le modèle n'a aucun outil, donc un mail piégé ne peut rien faire (au pire, fausser le résumé).
+
+```bash
+sudo mkdir -p /opt/ai-stack/resume
+sudo cp resume/resume_matin.py /opt/ai-stack/resume/
+sudo cp resume/resume.env.example /opt/ai-stack/resume/resume.env   # obligatoire, même sans rien changer
+sudo cp spark/systemd/resume-matin.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# Essai sans rien déposer : écrit resume-test.html dans le dossier courant
+sudo MAIL_CONF=/opt/ai-stack/mcpo/mail/mail.env python3 /opt/ai-stack/resume/resume_matin.py --test
+# Essai en vrai, puis activation tous les jours
+sudo systemctl start resume-matin && journalctl -u resume-matin -n 20
+sudo systemctl enable --now resume-matin.timer
+```
+
+Pour la partie Proxmox (serveurs, machines, stockages, sauvegardes vzdump de la nuit), remplir les lignes `PVE_*` de `resume.env` (une clé en lecture seule suffit : `PVEAuditor` sur `/`) et copier le certificat `pve-root-ca.pem` dans `/opt/ai-stack/resume/`. La ligne `SONDES` liste les services du réseau à tester chaque matin (Vaultwarden, VPN, LanguageTool…).
+
+Gmail ne fait pas toujours sonner le téléphone pour un message déposé de cette façon : il apparaît en haut de la réception, en gras, mais sans notification. Si tu veux une notification, on ajoutera ntfy plus tard.
+
+### 7. Studio : galerie, archivage sur pve2, ménage automatique (désactivé par défaut)
+
+La page `/studio` est une galerie : filtres (images, vidéos, 3D, gardées, archivées, échecs), et sur chaque création **Télécharger**, **Archiver**, l'étoile (garder) et la croix (supprimer).
+
+Le **ménage automatique est désactivé par défaut** (`STUDIO_GARDER_JOURS=0`) : rien ne quitte le Spark sans qu'on l'ait demandé. Une fois activé avec l'archivage ci-dessous, toutes les 6 h, les créations de plus de N jours non marquées d'une étoile partent sur **pve2** (fichier + fiche `.json` avec le prompt, rangés par `AAAA/MM/`), puis sont retirées du Spark. Les échecs sont simplement supprimés. Si l'envoi rate, rien n'est supprimé : le ménage réessaie plus tard.
+
+Sans `STUDIO_ARCHIVE`, le ménage **n'efface rien**, même avec une durée réglée. Pour vraiment supprimer définitivement les vieilles créations sans les archiver, il faut le choisir explicitement : `Environment=STUDIO_MENAGE_SUPPRIMER=1` (en plus de `STUDIO_GARDER_JOURS`).
+
+Le Spark n'a le droit que d'**ajouter** des fichiers sur pve2 (`rrsync -wo`) : il ne peut ni lire, ni modifier, ni effacer les archives, comme pour les sauvegardes.
+
+Sur **pve2** (root) :
+
+```bash
+apt install rsync                       # fournit aussi rrsync
+useradd -m -s /bin/sh studio
+mkdir -p /mnt/tank/studio && chown studio: /mnt/tank/studio
+```
+
+Sur le **Spark** :
+
+```bash
+sudo ssh-keygen -t ed25519 -N "" -C studio-archive -f /opt/ai-stack/studio/archive_ed25519
+sudo cat /opt/ai-stack/studio/archive_ed25519.pub     # à copier sur pve2, ligne ci-dessous
+```
+
+Sur **pve2**, dans `/home/studio/.ssh/authorized_keys` (une seule ligne) :
+
+```
+restrict,command="rrsync -wo /mnt/tank/studio" ssh-ed25519 AAAA…(la clé)… studio-archive
+```
+
+Puis sur le **Spark** : enregistrer l'empreinte de pve2 (répondre `yes`, le message d'erreur de rrsync qui suit est normal), activer l'archivage et tester avec le bouton **Archiver** sur une vieille création :
+
+```bash
+sudo ssh -i /opt/ai-stack/studio/archive_ed25519 studio@IP_DE_PVE2
+sudo systemctl edit studio-runner        # ajouter : [Service]  Environment=STUDIO_ARCHIVE=studio@IP_DE_PVE2:
+sudo systemctl restart studio-runner
+```
+
+Le bouton **Archiver** marche dès que `STUDIO_ARCHIVE` est réglé. Pour le ménage automatique, ajouter aussi la durée, par exemple `Environment=STUDIO_GARDER_JOURS=60` (`0` = jamais, valeur par défaut). Les archives se consultent sur pve2 dans `/mnt/tank/studio/` (ou en partage réseau si tu en ajoutes un).
+
+### 8. llama-swap (désactivé par défaut)
+
+Aujourd'hui, pour une vidéo, le Studio **arrête** le service du chat puis le relance : Open WebUI croit alors que le modèle n'existe plus (« Model not found »), et Ollama fait tourner en parallèle le gros modèle des tâches (`qwen3.8:27b`, ~20 Go). Avec [llama-swap](https://github.com/mostlygeek/llama-swap), un seul programme reste toujours en ligne sur `127.0.0.1:8090` (même port qu'avant) et charge / décharge les modèles à la demande :
+
+- **Flash-Next** (alias `verif` pour le Studio), libéré après 30 min sans message comme avant ;
+- **tache** : un petit modèle (Qwen3.5 2B, ~2 Go) pour les titres, tags et suggestions, à la place du 27 B d'Ollama ;
+- **bge-m3** : les embeddings des documents, à la place d'Ollama.
+
+Pendant une vidéo ou une 3D, le Studio vide llama-swap par son API et pose `/run/studio-pause` : tant que ce fichier existe, `garde-memoire` refuse de recharger un modèle (pas de conflit de mémoire avec ComfyUI). À la fin, le Studio enlève la pause et recharge Flash-Next tout de suite.
+
+**Activer** (depuis le dépôt, sur le Spark) — télécharge llama-swap (empreinte vérifiée) et les deux petits modèles, installe la config, bascule les services et arrête Ollama :
+
+```bash
+sudo spark/scripts/activer-llama-swap            # ou --garder-ollama pour laisser Ollama tourner
+journalctl -u llama-swap -f                      # journal ; interface : http://127.0.0.1:8090/ui sur le Spark
+```
+
+Puis dans **Open WebUI** (*Réglages admin*) — les variables du compose ne s'appliquent qu'au premier démarrage, ces réglages sont dans la base :
+
+1. *Documents* : moteur d'embeddings **OpenAI**, URL `http://127.0.0.1:8090/v1`, clé `none`, modèle `bge-m3`, puis **réindexer** les documents (les anciens vecteurs viennent d'Ollama).
+2. *Interface* : modèle des tâches (pour les modèles externes) = `tache`.
+3. *Connexions* : désactiver l'API Ollama.
+
+**À vérifier** : un message normal, une image (le chat reste dispo), une vidéo (pendant la vidéo un message répond « Chat en pause », puis le chat revient seul à la fin), un document dans une conversation, et le titre automatique des conversations.
+
+**Revenir en arrière** à tout moment : `sudo spark/scripts/revenir-sans-llama-swap`, puis remettre dans Open WebUI les réglages d'avant (embeddings Ollama, modèle des tâches, API Ollama).
+
+### 9. Agent Manga (traduction japonais / anglais → français)
+
+Un modèle **Manga** dans Open WebUI : tu lui envoies des pages, ou un chapitre entier en `.cbz`, `.zip` ou `.pdf`, et il te les rend **traduites en français dans les bulles** (texte d'origine effacé, fond redessiné). Le travail technique est fait par [manga-image-translator](https://github.com/zyddnys/manga-image-translator) (conteneur `manga`) ; la traduction elle-même par **Flash-Next**, avec un **carnet par série** (noms des personnages, attaques, lieux) pour rester cohérent d'un chapitre à l'autre. Tout reste sur le Spark. Pour ton usage perso : pas pour repartager des scans.
+
+Ce qu'il sait faire, en parlant normalement :
+- « traduis ce chapitre de One Piece » + le `.cbz` → aperçu dans le chat, **Lire tout** (liseuse adaptée au téléphone) et le `.cbz` traduit à télécharger ;
+- « page 7, la bulle du haut c'est une blague » → il **refait la page** avec ta remarque, le `.cbz` est mis à jour ;
+- « appelle-le Sensei, pas Professeur » → il le **note dans le carnet** de la série ;
+- les chapitres apparaissent aussi dans la galerie `/studio` (filtre « Mangas »), et partent sur pve2 comme le reste si le ménage automatique est activé (section 7, désactivé par défaut).
+
+**Installation** (sur le Spark, depuis le dépôt) — idéalement avec llama-swap actif (section 8), qui fournit l'alias `manga` (Flash-Next sans phase de réflexion, beaucoup plus rapide) ; sans lui ça marche aussi, plus lentement :
+
+```bash
+sudo mkdir -p /opt/ai-stack/manga/series /opt/ai-stack/manga/travail
+sudo cp -r manga/. /opt/ai-stack/manga/                 # Dockerfile du conteneur
+sudo cp studio/manga.py studio/runner.py /opt/ai-stack/studio/ && sudo systemctl restart studio-runner
+sudo apt install poppler-utils                          # pour les PDF
+cd /opt/ai-stack && docker compose --profile manga build manga    # long la première fois (~20-30 min)
+docker compose --profile manga up -d manga && docker compose logs -f manga
+```
+
+Puis dans **Open WebUI** :
+1. *Espace de travail → Outils* : importer `openwebui/outils/manga_tool.py`.
+2. *Espace de travail → Modèles → Nouveau* : « Manga », basé sur Flash-Next, consignes système = contenu de `studio/consignes-manga.txt`, outil **Manga** seulement (pas de web, pas de code), filtre « Outils du modèle toujours actifs ».
+3. Essayer avec une seule page avant un chapitre entier. La **première** traduction télécharge les modèles de lecture et d'effacement (quelques minutes).
+
+**Bon à savoir**
+- Compter ~15 à 60 s par page. Les traductions passent dans la même file que les vidéos du Studio : pas de bataille pour la mémoire.
+- Les onomatopées dessinées dans le décor restent en général en japonais ; le texte manuscrit très stylisé est parfois mal lu ; sur les petites bulles, le texte est réduit pour tenir. Pour tout ça : « refais la page N ».
+- Une page qui plante reste en version originale dans le chapitre (signalé dans la liseuse) : demande de la refaire.
+- Limites : 400 Mo et 400 pages par envoi (un chapitre à la fois).
+- Le conteneur est construit pour ARM à partir de l'image PyTorch de NVIDIA. Un module Rust de manga-image-translator n'existe peut-être pas pour ARM : il ne sert qu'au détecteur « paddle », que l'on n'utilise pas, et il est désactivé automatiquement s'il manque.
+- Arrêter : `docker compose --profile manga stop manga` (le reste du homelab n'en dépend pas).
+
+### 10. À faire ensuite (moins urgent)
+
+- **Figer les versions** : `open-webui:main` est une version de développement, pas une version stable. Utiliser par exemple `ghcr.io/open-webui/open-webui:v0.12.3`, et des versions précises au lieu de `:latest` (Qdrant, SearXNG, Jupyter, Vaultwarden…) (les serveurs MCP de `mail/config.json` sont déjà figés dans cette branche).
+- **Remplacer du code maison par des outils existants** : Proxmox Backup Server pour les sauvegardes des machines ; Diun ou Renovate pour être prévenu des nouvelles versions ; options mémoire de ComfyUI (`--disable-smart-memory`) au lieu du timer qui le vide toutes les 5 min.
+- **Vaultwarden** : passer en 1.37.4 ou plus (7 failles corrigées), activer la double authentification, et n'accepter le port 8080 que depuis HAProxy (pare-feu Proxmox sur le conteneur 110, source 192.168.0.212).
+- **wg-easy** : activer la double authentification de l'interface ; charger `wireguard` sur l'hôte Proxmox puis retirer `SYS_MODULE` et le montage `/lib/modules`.
+- **Modèle des tâches** (titres, tags, requêtes de recherche) : un petit modèle (2-3 B) au lieu du 27 B, comme le conseille la doc d'Open WebUI.
+- **Chat mis en pause pendant les vidéos** : remplacer `systemctl stop/start` par le mode « router » de llama.cpp (`/models/unload`) ou llama-swap : le serveur reste joignable, plus d'erreur « Model not found ».
+- **Sauvegardes** : ajouter une copie hors de la maison (`restic copy`), sauvegarder Qdrant par son API de snapshots, et faire un test de restauration de temps en temps.

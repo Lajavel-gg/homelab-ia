@@ -85,7 +85,7 @@ def main():
         "Si rien de nouveau : []"
     )
     req = {
-        "model": "qwen3.8-flash-next",
+        "model": "chef",
         "messages": [{"role": "user", "content": consigne}],
         "temperature": 0.1,
         "chat_template_kwargs": {"enable_thinking": False},

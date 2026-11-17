@@ -295,7 +295,7 @@ async def _rafraichir_modeles(request, user):
             u = None
         for _ in range(6):
             await get_all_models(request, refresh=True, user=u)
-            if any(str(k).startswith("qwen3.8-flash-next") for k in dict(request.app.state.MODELS.items()).keys()):
+            if any(str(k).startswith("chef") for k in dict(request.app.state.MODELS.items()).keys()):
                 return
             await asyncio.sleep(5)
     except Exception:  # noqa: BLE001

@@ -72,6 +72,13 @@ flowchart LR
 ## Captures
 
 <!-- captures -->
+Vraies captures d'Ulysse (compte de démonstration, base vide).
+
+**Chat : recherche web, réponse avec ses sources**
+
+<img src="docs/captures/pc-1-recherche.png" alt="Chat : recherche web, réponse avec ses sources" width="860">
+
+<!-- /captures -->
 
 ## Le mode Code : un chef et des ouvriers
 

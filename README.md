@@ -78,6 +78,22 @@ Vraies captures d'Ulysse (compte de démonstration, base vide).
 
 <img src="docs/captures/pc-1-recherche.png" alt="Chat : recherche web, réponse avec ses sources" width="860">
 
+**Chat : une maquette d'appli faite par Ulysse, réutilisable en mode Code**
+
+<img src="docs/captures/pc-2-maquette.png" alt="Chat : une maquette d'appli faite par Ulysse, réutilisable en mode Code" width="860">
+
+**Chat : une image créée sur le Spark**
+
+<img src="docs/captures/pc-3-image.png" alt="Chat : une image créée sur le Spark" width="860">
+
+**Mode Code : les projets, le chef et ses ouvriers**
+
+<img src="docs/captures/pc-4-code.png" alt="Mode Code : les projets, le chef et ses ouvriers" width="860">
+
+**Téléphone : le chat**
+
+<img src="docs/captures/tel-2-chat.png" alt="Téléphone : le chat" width="320">
+
 <!-- /captures -->
 
 ## Le mode Code : un chef et des ouvriers

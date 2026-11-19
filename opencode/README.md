@@ -15,6 +15,7 @@ Les agents sont dans [`agents/`](agents/) (à copier dans `~/.config/opencode/ag
 | `codeur` | ouvrier | Fait UNE tâche : écrit d'abord le test (skill `tdd`), puis le code, jusqu'à ce que son critère passe. |
 | `verificateur` | ouvrier | Lance tous les tests, compare `git diff` à la demande, rend un rapport court. Ne modifie rien. |
 | `relecteur` | chef | Relecture à la demande, avant un commit. |
+| `relecture-rapide` | ouvrier | Depuis le 19/11 : relecture courte de la course, lecture seule ; écrit « À REVOIR PAR LE CHEF » seulement s'il voit un problème. |
 
 Pourquoi le chef reçoit la demande : sur deux vraies tâches, un ouvrier seul a eu **3/5 et 1/5** (un cas oublié ;
 un fichier demandé effacé, un script qui restait bloqué). Avec le chef qui confie puis vérifie : **4/5 et 4/5**.
@@ -116,6 +117,38 @@ rapide), et un banc de modèles locaux sur GB10 ([DG1001/local-agentic-coding-12
 OpenCode tourne dans une VM Proxmox isolée et écrit le code des projets étape par étape (fichier `CHANTIER.md`), avec le modèle du DGX Spark. Le chef vérifie chaque tâche, puis Claude relit avant toute publication.
 
 Une *skill* est une fiche de méthode (`SKILL.md`) que l'agent lit seulement quand la tâche en a besoin. OpenCode les cherche dans `~/.config/opencode/skills/<nom>/` (toute la machine) ou `.opencode/skills/<nom>/` (un projet). Vérifier qu'elle est vue : `opencode debug skill`.
+
+#### 18 et 19/11 : course plus rapide, mode équipe réglé, OpenCode V2
+
+Deux nouveaux essais, avec des tests cachés lancés 3 fois avec `-race` : un **facile** (4 fichiers Go indépendants)
+et un **difficile** (cache LRU concurrent, file de travaux avec fermeture propre, analyseur de durées).
+
+| Essai | Durée | Détail | Tests cachés |
+|---|---|---|---|
+| Facile, équipe (règles de vitesse) | 21,6 min | jusqu'à 3 codeurs ensemble (avant : 1 seul) | 4/4 |
+| Facile, course, 1 seule tâche | 24,9 min | | 4/4 |
+| Facile, course, une tâche par fichier | 21,7 min | 4 ouvriers ensemble, 42 s de course | 4/4 |
+| Facile, course + relecture rapide | 17,5 min | relecture 85 s au lieu de 387 s | 4/4 |
+| Difficile, course | 53,7 min | architecte 47,8 ; course 4,2 ; relecture 1,7 | 3/3 |
+| Difficile, architecte = modèle ouvrier | arrêté à 75 min | préparation en moins de 7 min, mais un test mal pensé et un ouvrier qui écrit dans un dossier mal tapé | raté |
+| Facile, OpenCode V2, équipe | 15,8 min | 4 codeurs lancés ensemble | 3/4 |
+| Difficile, OpenCode V2, équipe | 50,9 min | 3 codeurs ensemble | 3/3 |
+| Facile, OpenCode V2, course pilotée par l'application | 18,8 min | 4 gagnants au premier essai | 4/4 |
+
+Ce qui a changé :
+
+- **Mode équipe** : le chef faisait tout à la suite (25 min de réflexion avant le premier codeur, 1 codeur à la fois).
+  Règles ajoutées dans `equipe` : la première action est de lancer les codeurs, au plus 3 lectures avant,
+  une question = un codeur lecteur, un fichier = un codeur, tout lancer dans la même réponse ; `bash` limité à `git`
+  en lecture et `ls`. On n'a **pas** limité la réflexion du chef : il prépare moins bien les tâches.
+- **Course** : l'architecte découpe par fichier (3 à 8 tâches) ; la relecture courte est faite par un agent
+  `relecture-rapide` (modèle ouvrier, lecture seule) qui renvoie au chef seulement s'il voit un problème ;
+  l'application passe `gofmt` sur le code des gagnants.
+- **OpenCode V2** (2.3) : sous-agents en arrière-plan, le chef ne bloque plus. L'API HTTP a complètement changé
+  (`/api/session`, agent choisi à la création de la session, flux d'événements unique) : le client Go de l'application
+  a été adapté et détecte la version tout seul. Essai sur une VM à part avant de basculer.
+- Leçon : **le goulot est la réflexion du chef**, pas les ouvriers ni `go test` (1,4 s). Le cache de préfixe de vLLM
+  sert 91 % des jetons d'entrée.
 
 ## La commande `verifier-tests`
 
